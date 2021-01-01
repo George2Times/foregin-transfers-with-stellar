@@ -1,0 +1,15 @@
+{
+  "name": "stellar",
+  "version": "1.0.0",
+  "main": "CreateAccount.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Jerzy Dziubel",
+  "license": "ISC",
+  "dependencies": {
+    "request": "^2.88.2",
+    "stellar-sdk": "^6.2.0"
+  },
+  "description": ""
+}

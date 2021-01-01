@@ -1,0 +1,34 @@
+# Sample stellar.toml
+
+#   The endpoint which clients should query to resolve stellar addresses
+#   for users on your domain.
+
+FEDERATION_SERVER="https://bankb.com:8002/federation"
+AUTH_SERVER="https://bankb.com:8005"
+SIGNING_KEY="GBETQAVAWJJIQ7CZPXWLXKZO6BELLACNR3E7BRD4WTYEANAGGR62VP6Q"
+ACCOUNTS=[
+" GBETQAVAWJJIQ7CZPXWLXKZO6BELLACNR3E7BRD4WTYEANAGGR62VP6Q"
+]
+
+DESIRED_BASE_FEE=100
+DESIRED_MAX_TX_PER_LEDGER=400
+[[CURRENCIES]]
+code="USD"
+issuer="GAIHBCB57M2SDFQYUMANDBHW4YYMD3FJVK2OGHRKKCNF2HBZIRBKRX6E"
+
+
+# optional extra information for humans
+# Useful place for anchors to detail various policies and required info
+
+###################################
+# Required compliance fields:
+#      name=<recipient name>
+#      addr=<recipient address>
+# Federation Format:  
+#        <phone number>*anchor.com
+#        Forwarding supported by sending to: forward*anchor.com
+#           forward_type=bank_account
+#           swift=<swift code of receiving bank>
+#           acct=<recipient account number at receiving bank>
+# Minimum Amount Forward: $2 USD
+# Maximum Amount Forward: $10000 USD
