@@ -1,0 +1,68 @@
+App now running on port 3600
+App now running on port 3602
+request johndoe*banka.com
+ID johndoe johndoe*banka.com
+Result {
+  command: 'SELECT',
+  rowCount: 1,
+  oid: null,
+  rows: [
+    { name: 'John Doe', address: 'cityA', dob: 1011988, balance: 1010 }
+  ],
+  fields: [
+    Field {
+      name: 'name',
+      tableID: 16388,
+      columnID: 1,
+      dataTypeID: 1043,
+      dataTypeSize: -1,
+      dataTypeModifier: -1,
+      format: 'text'
+    },
+    Field {
+      name: 'address',
+      tableID: 16388,
+      columnID: 2,
+      dataTypeID: 1043,
+      dataTypeSize: -1,
+      dataTypeModifier: -1,
+      format: 'text'
+    },
+    Field {
+      name: 'dob',
+      tableID: 16388,
+      columnID: 3,
+      dataTypeID: 23,
+      dataTypeSize: 4,
+      dataTypeModifier: -1,
+      format: 'text'
+    },
+    Field {
+      name: 'balance',
+      tableID: 16388,
+      columnID: 6,
+      dataTypeID: 23,
+      dataTypeSize: 4,
+      dataTypeModifier: -1,
+      format: 'text'
+    }
+  ],
+  _parsers: [
+    [Function: noParse],
+    [Function: noParse],
+    [Function: parseInteger],
+    [Function: parseInteger]
+  ],
+  _types: TypeOverrides {
+    _types: {
+      getTypeParser: [Function: getTypeParser],
+      setTypeParser: [Function: setTypeParser],
+      arrayParser: [Object],
+      builtins: [Object]
+    },
+    text: {},
+    binary: {}
+  },
+  RowCtor: null,
+  rowAsArray: false
+}

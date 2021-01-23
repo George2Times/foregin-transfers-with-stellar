@@ -1,18 +1,20 @@
 const express = require("express");
 const bodyParser = require("body-parser");
 const app = express();
-const pg = require("pg");
-const conString = "postgres://bankbuser:password1@localhost:5432/bankb";
-
 const requestObj = require("request");
-const client = new pg.Client(conString);
-//const bankclient = new pg.Client(compString);
-client.connect();
-//bankclient.connect();
+const pg = require("pg");
+
+// ==== Config ====
+var listened_port = 3602;
+var domain = "*bankb.com";
+const conString = "postgres://bankbuser:password1@localhost:5432/bankb";
 const USD = "USD";
 const issuer = "GAIHBCB57M2SDFQYUMANDBHW4YYMD3FJVK2OGHRKKCNF2HBZIRBKRX6E";
-var txid = 1001;
+var entryPointBS = "http://localhost:8007/payment";
+var txid = 2000;
 
+const client = new pg.Client(conString);
+client.connect();
 app.use(bodyParser.json());
 app.use(
   bodyParser.urlencoded({
@@ -44,173 +46,202 @@ app.use(function (req, res, next) {
   next();
 });
 
-var server = app.listen(process.env.PORT || 3602, function () {
+var server = app.listen(process.env.PORT || listened_port, function () {
   var port = server.address().port;
   console.log("App now running on port", port);
 });
 
 app.post("/userdet", function (request, response) {
-  console.log("request", request.body.friendlyid);
-  var idParts = request.body.friendlyid.split("*");
-  var friendlyId = idParts[0];
-  console.log("ID", friendlyId, request.body.friendlyid);
-  // You need to create `accountDatabase.findByFriendlyId()`. It should look
-  // up a customer by their Stellar account and return account information.
+  console.log("/userdet: ");
+  if(!request.body.friendlyid) {
+    console.log("request.body.friendlyid:", request.body.friendlyid);
+  } else {
+    var IdParts = request.body.friendlyid.split("*");
+    var ID = IdParts[0];
+    
+    console.log("friendlyid:", request.body.friendlyid);
+    console.log("ID:", ID);
+    // You need to create `accountDatabase.findByFriendlyId()`. It should look
+    // up a customer by their Stellar account and return account information.
 
-  client.query(
-    "SELECT name,address,dob,balance from users where friendlyid = $1",
-    [friendlyId],
-    (error, results) => {
-      if (error) {
-        throw error;
+    client.query(
+      "SELECT name,address,dob,balance FROM users WHERE friendlyid = $1", [ID],
+      (error, results) => {
+        if (error) {
+          throw error;
+        }
+        console.log("query response rowCount:", results.rowCount);
+        if (results.rowCount != 0) {
+          var answer = {
+            // response: results,
+            name: results.rows[0].name,
+            address: results.rows[0].address,
+            date_of_birth: results.rows[0].dob,
+            balance: results.rows[0].balance,
+          };
+          console.log("query answer:", answer);
+          response.json(answer);
+          response.end();
+        }
       }
-      console.log("response:", results);
-      if (results.rowCount != 0) {
-        response.json({
-          // response: results,
-          name: results.rows[0].name,
-          address: results.rows[0].address,
-          date_of_birth: results.rows[0].dob,
-          balance: results.rows[0].balance,
-        });
-        response.end();
-      }
-    }
-  );
+    );
+  }
 });
 
 app.post("/userbal", function (request, response) {
-  console.log("request", request.body.friendlyid);
-  var idParts = request.body.friendlyid.split("*");
-  var friendlyId = idParts[0];
+  console.log("/userbal: ");
+  if(!request.body.friendlyid) {
+    console.log("request.body.friendlyid:", request.body.friendlyid);
+  } else {
+    var IdParts = request.body.friendlyid.split("*");
+    var ID = IdParts[0];
+    
+    console.log("friendlyid:", request.body.friendlyid);
+    console.log("ID:", ID);
 
-  // You need to create `accountDatabase.findByFriendlyId()`. It should look
-  // up a customer by their Stellar account and return account information.
-
-  client.query(
-    "SELECT balance from users where friendlyid = $1",
-    [friendlyId],
-    (error, results) => {
-      if (error) {
-        throw error;
+    client.query(
+      "SELECT balance FROM users WHERE friendlyid = $1", [ID],
+      (error, results) => {
+        if (error) {
+          throw error;
+        }
+        if (results) {
+          console.log("query response rowCount:", results.rowCount);
+          if (results.rowCount != 0) {
+            var answer = {
+              // response: results,{
+              balance: results.rows[0].balance,
+            };
+            console.log("query answer:", answer);
+            response.json(answer);
+            //client.end();
+            response.end();
+          }
+        }
       }
-
-      if (results) {
-        response.json({
-          balance: results.rows[0].balance,
-        });
-        //client.end();
-        response.end();
-      }
-    }
-  );
+    );
+  }
 });
 
 app.post("/payment", function (request, response) {
-  var idParts = request.body.account.split("*");
-  var friendlyId = idParts[0];
+  console.log("/payment: ");
+  if(!request.body.account) {
+    console.log("request.body.account:", request.body.account);
+  } else {
+    var IdParts = request.body.account.split("*");
+    var ID = IdParts[0];
+    var friendlyid = ID + domain;
+    console.log("friendlyid:", friendlyid);
+    console.log("ID:", ID);
 
-  client.query(
-    "SELECT balance from users where friendlyid = $1",
-    [friendlyId],
-    (error, results) => {
-      if (error) {
-        response.json({
-          msg: "ERROR!",
-          error_msg: error,
-        });
-        response.end();
-      }
-
-      if (results.rowCount != 0) {
-        balance = results.rows[0].balance;
-        if (balance < Number(request.body.amount)) {
+    client.query(
+      "SELECT balance from users where friendlyid = $1", [ID],
+      (error, results) => {
+        if (error) {
           response.json({
             msg: "ERROR!",
-            error_msg: "Insufficient balance!",
+            error_msg: error,
           });
           response.end();
         }
-
-        requestObj.post(
-          {
-            url: "http://localhost:8007/payment",
-            form: {
-              id: txid.toString(),
-              amount: request.body.amount,
-              asset_code: USD,
-              asset_issuer: issuer,
-              destination: request.body.receiver,
-              sender: request.body.account,
-              use_compliance: true,
-            },
-          },
-          function (err, res, body) {
-            if (err || res.statusCode !== 200) {
-              console.error("ERROR!", err || body);
-              response.json({
-                result: body,
-                msg: "ERROR!",
-                error_msg: err,
-              });
-              response.end();
-            } else {
-              console.log("SUCCESS!", body);
-              client.query(
-                "SELECT balance from users where friendlyid = $1",
-                [friendlyId],
-                (error, results) => {
-                  if (error) {
-                    console.log(error);
-                    response.status(500).end("User Not found");
-                  }
-                  if (results) {
-                    var balance = Number(results.rows[0].balance);
-                    balance = balance + -request.body.amount;
-                    console.log("balance", balance);
-
-                    client.query(
-                      "UPDATE users set balance = $1 where friendlyid = $2",
-                      [balance, friendlyId],
-                      (error, results) => {
-                        if (error) {
-                          console.log(error);
-                          response.status(500).end("User Not found");
-                        }
-
-                        if (results) {
-                          response.json({
-                            result: body,
-                            msg: "SUCCESS!",
-                          });
-                          txid++;
-                          console.log("Next txid", txid);
-                          response.status(200).end();
-                        }
-                      }
-                    );
-                  }
-                }
-              );
-            }
+        console.log("query response rowCount:", results.rowCount);
+        if (results.rowCount != 0) {
+          balance = results.rows[0].balance;
+          console.log("query response balance:", balance);
+          if (balance < Number(request.body.amount)) {
+            response.json({
+              msg: "ERROR!",
+              error_msg: "Insufficient balance!",
+            });
+            response.end();
           }
-        );
+          var paymentRequestForm = {
+            id: txid.toString(),
+            amount: request.body.amount,
+            asset_code: USD,
+            asset_issuer: issuer,
+            destination: request.body.receiver,
+            sender: friendlyid,
+            use_compliance: true,
+          };
+          console.log("paymentRequestForm:", paymentRequestForm);
+          requestObj.post({
+              url: entryPointBS,
+              form: paymentRequestForm,
+            },
+            function (err, res, body) {
+              if (err || res.statusCode !== 200) {
+                console.error("ERROR!", err || body);
+                response.json({
+                  result: body,
+                  msg: "ERROR!",
+                  error_msg: err,
+                });
+                response.end();
+              } else {
+                console.log("SUCCESS!", body);
+                client.query(
+                  "SELECT balance from users where friendlyid = $1", [ID],
+                  (error, results) => {
+                    if (error) {
+                      console.log(error);
+                      response.status(500).end("User Not found");
+                    }
+                    if (results) {
+                      var balance = Number(results.rows[0].balance);
+                      balance = balance + -request.body.amount;
+                      console.log("update ID, balance:", ID, ",", balance);
+                      client.query(
+                        "UPDATE users set balance = $1 where friendlyid = $2", [balance, ID],
+                        (error, results) => {
+                          if (error) {
+                            console.log(error);
+                            response.status(500).end("User Not found");
+                          }
+                          if (results) {
+                            response.json({
+                              result: body,
+                              msg: "SUCCESS!",
+                            });
+                            txid++;
+                            console.log("Next txid", txid);
+                            response.status(200).end();
+                          }
+                        }
+                      );
+                    }
+                  }
+                );
+              }
+            }
+          );
+        }
       }
-    }
-  );
+    );
+  }
 });
 
 app.get("/bankuser", function (request, response) {
+  console.log("/bankuser:");
   client.query("SELECT * from transactions", (error, results) => {
     if (error) {
       throw error;
     }
 
     if (results) {
-      response.json({
-        tx: results.rows,
-      });
-      response.end();
+      console.log("query response rowCount:", results.rowCount);
+      if (results) {
+        var answer = {tx: results.rows,};
+        console.log("query response rows:", answer);
+        response.json(answer);
+        response.end();
+      }
+      else{
+        response.end();
+      }
+    }
+    else {
+      console.log("ERROR KYC details");
     }
   });
 });

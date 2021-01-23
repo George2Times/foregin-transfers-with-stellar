@@ -20,6 +20,40 @@ var USD = new StellarSdk.Asset(
   "GAIHBCB57M2SDFQYUMANDBHW4YYMD3FJVK2OGHRKKCNF2HBZIRBKRX6E"
 );
 
+// Transfer 1000 USD to receivingKeys1 (bank A)
+// server.fetchBaseFee().then(function (fee) {
+//   console.log("Fee is", fee);
+//   server
+//     .loadAccount(issuingKeys.publicKey())
+//     .then(function (account) {
+//       var transaction = new StellarSdk.TransactionBuilder(account, {
+//         fee,
+//         networkPassphrase: "Standalone Network ; February 2017",
+//       })
+//         .addOperation(
+//           StellarSdk.Operation.payment({
+//             destination: receivingKeys1.publicKey(),
+//             asset: USD,
+//             amount: "1000",
+//           })
+//         )
+//         .setTimeout(100)
+//         .build();
+
+//       transaction.sign(issuingKeys);
+
+//       return server.submitTransaction(transaction);
+//     })
+//     .then(function (response, error) {
+//       if (response) {
+//         console.log("Response", response);
+//       } else {
+//         console.log("Error", error);
+//       }
+//     });
+// });
+
+// Transfer 2000 USD to receivingKeys1 (bank A)
 server.fetchBaseFee().then(function (fee) {
   console.log("Fee is", fee);
   server
@@ -31,9 +65,9 @@ server.fetchBaseFee().then(function (fee) {
       })
         .addOperation(
           StellarSdk.Operation.payment({
-            destination: receivingKeys1.publicKey(),
+            destination: receivingKeys2.publicKey(),
             asset: USD,
-            amount: "1000",
+            amount: "2000",
           })
         )
         .setTimeout(100)

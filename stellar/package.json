@@ -8,6 +8,7 @@
   "author": "Jerzy Dziubel",
   "license": "ISC",
   "dependencies": {
+    "recursive-install": "^1.4.0",
     "request": "^2.88.2",
     "stellar-sdk": "^6.2.0"
   },
