@@ -1,2 +1,1 @@
-# foregin transfers with stellar
- 
+# foregin-transfers-with-stellar
