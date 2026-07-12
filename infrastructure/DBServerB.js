@@ -68,7 +68,9 @@ app.post("/userdet", function (request, response) {
       "SELECT name,address,dob,balance FROM users WHERE friendlyid = $1", [ID],
       (error, results) => {
         if (error) {
-          throw error;
+          console.error(error);
+          response.status(500).json({ msg: "ERROR!", error_msg: "Database error" });
+          return;
         }
         console.log("query response rowCount:", results.rowCount);
         if (results.rowCount != 0) {
@@ -82,6 +84,8 @@ app.post("/userdet", function (request, response) {
           console.log("query answer:", answer);
           response.json(answer);
           response.end();
+        } else {
+          response.status(404).json({ msg: "ERROR!", error_msg: "User not found" });
         }
       }
     );
@@ -103,7 +107,9 @@ app.post("/userbal", function (request, response) {
       "SELECT balance FROM users WHERE friendlyid = $1", [ID],
       (error, results) => {
         if (error) {
-          throw error;
+          console.error(error);
+          response.status(500).json({ msg: "ERROR!", error_msg: "Database error" });
+          return;
         }
         if (results) {
           console.log("query response rowCount:", results.rowCount);
@@ -116,6 +122,8 @@ app.post("/userbal", function (request, response) {
             response.json(answer);
             //client.end();
             response.end();
+          } else {
+            response.status(404).json({ msg: "ERROR!", error_msg: "User not found" });
           }
         }
       }
@@ -143,6 +151,7 @@ app.post("/payment", function (request, response) {
             error_msg: error,
           });
           response.end();
+          return;
         }
         console.log("query response rowCount:", results.rowCount);
         if (results.rowCount != 0) {
@@ -154,6 +163,7 @@ app.post("/payment", function (request, response) {
               error_msg: "Insufficient balance!",
             });
             response.end();
+            return;
           }
           var paymentRequestForm = {
             id: txid.toString(),
@@ -225,7 +235,9 @@ app.get("/bankuser", function (request, response) {
   console.log("/bankuser:");
   client.query("SELECT * from transactions", (error, results) => {
     if (error) {
-      throw error;
+      console.error(error);
+      response.status(500).json({ msg: "ERROR!", error_msg: "Database error" });
+      return;
     }
 
     if (results) {

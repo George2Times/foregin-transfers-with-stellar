@@ -60,7 +60,9 @@ app.post("/compliance/fetch_info", function (request, response) {
     "SELECT name,address,dob,domain FROM users WHERE friendlyid = $1", [friendlyId],
     (error, results) => {
       if (error) {
-        throw error;
+        console.error(error);
+        response.status(500).json({ msg: "ERROR!", error_msg: "Database error" });
+        return;
       }
       if (results.rowCount != 0) {
         var answer = {
@@ -109,6 +111,7 @@ app.post("/compliance/ask_user", function (request, response) {
     (error, results) => {
       if (error) {
         response.status(403).end("FI not sanctioned");
+        return;
       }
       console.log("query response rowCount:", results.rowCount);
       if (results) {
