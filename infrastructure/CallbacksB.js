@@ -3,6 +3,7 @@ const bodyParser = require("body-parser");
 const app = express();
 const fetch = require("node-fetch");
 const pg = require("pg");
+const { parseAmount } = require("./money");
 
 // ==== Config ====
 var listened_port = 5100;
@@ -146,10 +147,25 @@ app.post("/compliance/ask_user", function (request, response) {
 
 app.post("/receive", function (request, response) {
   console.log("/receive");
-  var amount = parseInt(Number(request.body.amount).toFixed(2));
+  // The credited amount must be the amount the sender was debited, to the cent.
+  // This used to be parseInt(Number(amount).toFixed(2)), which threw away the
+  // fractional part of every payment: a $12.75 transfer debited the sender
+  // $12.75 and credited the receiver $12.00, destroying $0.75 in transit.
+  var amount = parseAmount(request.body.amount);
   var friendlyid = request.body.route;
   console.log("amount", amount);
   console.log("friendlyid", friendlyid);
+
+  if (amount === null) {
+    console.error("/receive: invalid amount:", request.body.amount);
+    response.status(400).end("Invalid amount");
+    return;
+  }
+  if (!friendlyid) {
+    console.error("/receive: missing route");
+    response.status(400).end("Missing route");
+    return;
+  }
   // `receive` may be called multiple times for the same payment, so check that
   // you haven't already seen this payment ID.
   var SendObj = JSON.parse(request.body.data);
