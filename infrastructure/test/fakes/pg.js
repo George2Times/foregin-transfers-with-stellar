@@ -1,20 +1,85 @@
-// Minimal in-memory fake of the `pg` package's Client, for offline unit
-// testing of the DBServer*/Callbacks* route handlers without a real
-// Postgres connection.
+// Minimal in-memory fake of the `pg` package, for offline unit testing of the
+// DBServer* / Callbacks* route handlers without a real Postgres connection.
 //
-// Usage in a test:
-//   const { Client } = require("./fakes/pg");
-//   ... require the server module under test (it does `new pg.Client(...)`) ...
-//   const client = Client.instances[Client.instances.length - 1];
-//   client.queueResponse({ error: null, results: { rowCount: 1, rows: [...] } });
+// Exposes both shapes the servers use:
+//   - Client: DBServerA/B hold a single long-lived client.
+//   - Pool:   CallbacksA/B need pool.connect() for /receive's BEGIN/COMMIT.
+//
+// Both record every query and consume the same queue of programmed results, so
+// a test can drive either one identically:
+//
+//   const { instances } = require("./fakes/pg");
+//   ... require the server module under test ...
+//   const db = instances[instances.length - 1];
+//   db.queueResponse({ error: null, results: { rowCount: 1, rows: [...] } });
+//   ... db.queries is [{ sql, params }, ...] afterwards, for assertions.
 
-class FakeClient {
-  constructor(conString) {
-    this.conString = conString;
-    this.connected = false;
+// Shared behavior: a recorded query log, and a FIFO of programmed responses.
+class FakeQueryable {
+  constructor(config) {
+    this.config = config;
     this.queries = []; // { sql, params } for every query made, for assertions
-    this._queue = []; // queued { error, results } responses, consumed in order
-    FakeClient.instances.push(this);
+    this._queue = []; // queued { error, results }, consumed in order
+    instances.push(this);
+  }
+
+  // Test helper: program the next query's result. Queue them in the order the
+  // handler under test will issue them.
+  queueResponse(response) {
+    this._queue.push(response);
+  }
+
+  // Test helper: clear recorded queries and any unconsumed responses, without
+  // losing this instance's identity (the server file closed over it).
+  reset() {
+    this.queries.length = 0;
+    this._queue.length = 0;
+  }
+
+  // Test helper: the SQL of every query issued so far, for order assertions.
+  sqlLog() {
+    return this.queries.map((q) => q.sql);
+  }
+
+  _next(sql, params) {
+    this.queries.push({ sql, params });
+    return (
+      this._queue.shift() || {
+        error: null,
+        results: { rowCount: 0, rows: [] },
+      }
+    );
+  }
+
+  // pg's query() is callback-style when given a callback, promise-style
+  // otherwise. Both are used in this codebase, so support both.
+  query(sql, params, callback) {
+    if (typeof params === "function") {
+      callback = params;
+      params = [];
+    }
+    const next = this._next(sql, params);
+
+    if (typeof callback === "function") {
+      // Defer, like a real DB round-trip, so tests exercise the same async
+      // control flow as production.
+      setImmediate(() => callback(next.error, next.results));
+      return undefined;
+    }
+
+    return new Promise((resolve, reject) => {
+      setImmediate(() => {
+        if (next.error) reject(next.error);
+        else resolve(next.results);
+      });
+    });
+  }
+}
+
+class FakeClient extends FakeQueryable {
+  constructor(conString) {
+    super(conString);
+    this.connected = false;
   }
 
   connect(cb) {
@@ -26,38 +91,45 @@ class FakeClient {
     this.connected = false;
     if (typeof cb === "function") cb(null);
   }
+}
 
-  // Test helper: program the next query's callback result.
-  queueResponse(response) {
-    this._queue.push(response);
+class FakePool extends FakeQueryable {
+  constructor(config) {
+    super(config);
+    this.released = 0; // how many borrowed connections were handed back
+    this.borrowed = 0;
+    this._handlers = {};
   }
 
-  // Test helper: clear recorded queries and any unconsumed queued
-  // responses, without losing the instance's identity/closures.
-  reset() {
-    this.queries.length = 0;
-    this._queue.length = 0;
+  on(event, handler) {
+    this._handlers[event] = handler;
+    return this;
   }
 
-  query(sql, params, callback) {
-    // pg supports query(sql, callback) with no params array.
-    if (typeof params === "function") {
-      callback = params;
-      params = [];
-    }
-    this.queries.push({ sql, params });
-
-    const next = this._queue.shift() || {
-      error: null,
-      results: { rowCount: 0, rows: [] },
+  // Hands out a connection backed by this same query log and response queue,
+  // so a test programs a pool and its connections as one thing. `released`
+  // lets a test assert the handler doesn't leak connections on its error paths.
+  connect() {
+    this.borrowed += 1;
+    const pool = this;
+    const connection = {
+      query: (sql, params, callback) => pool.query(sql, params, callback),
+      release: () => {
+        pool.released += 1;
+      },
     };
+    return Promise.resolve(connection);
+  }
 
-    // Defer, like a real DB round-trip, so tests exercise the same
-    // async control flow as production.
-    setImmediate(() => callback(next.error, next.results));
+  end() {
+    return Promise.resolve();
   }
 }
 
-FakeClient.instances = [];
+// Every Client/Pool built, in construction order, so a test can grab the one a
+// just-require()d server file created.
+const instances = [];
 
-module.exports = { Client: FakeClient };
+FakeClient.instances = instances;
+
+module.exports = { Client: FakeClient, Pool: FakePool, instances };

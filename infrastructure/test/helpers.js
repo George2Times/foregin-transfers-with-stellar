@@ -12,18 +12,21 @@ const { installMockRequire } = require("./mockRequire");
 installMockRequire();
 
 const express = require("./fakes/express");
-const { Client } = require("./fakes/pg");
+const { instances: dbInstances } = require("./fakes/pg");
 
+// `client` is whichever pg object the loaded file built -- a Client for the DB
+// servers, a Pool for the callbacks. Both fakes take the same queueResponse() /
+// queries interface, so tests don't care which one they got.
 function loadServer(fileName) {
   const modulePath = path.join(__dirname, "..", fileName);
-  const clientCountBefore = Client.instances.length;
+  const dbCountBefore = dbInstances.length;
   const appCountBefore = express.instances.length;
 
   delete require.cache[require.resolve(modulePath)];
   require(modulePath);
 
   return {
-    client: Client.instances[clientCountBefore],
+    client: dbInstances[dbCountBefore],
     app: express.instances[appCountBefore],
   };
 }

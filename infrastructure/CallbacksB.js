@@ -10,8 +10,18 @@ var listened_port = 5100;
 const conString = "postgres://bankbuser:password1@localhost:5432/bankb";
 var domain = "*bankb.com";
 
-const client = new pg.Client(conString);
-client.connect();
+// A pool, not a single Client: /receive runs a real BEGIN/COMMIT transaction,
+// and a transaction needs a connection to itself. On one shared Client, every
+// request's queries interleave on the same connection, so one request's BEGIN
+// would wrap another request's queries. A pool hands each transaction its own
+// connection. (One-off queries below still go through pool.query(), which
+// borrows and returns a connection per call.)
+const pool = new pg.Pool({ connectionString: conString });
+pool.on("error", function (error) {
+  // An idle client erroring out (e.g. the DB restarted) must not take the
+  // process down; the pool discards it and reconnects on the next query.
+  console.error("postgres pool error:", error);
+});
 app.use(bodyParser.json());
 app.use(
   bodyParser.urlencoded({
@@ -57,7 +67,7 @@ app.post("/compliance/fetch_info", function (request, response) {
   // You need to create `accountDatabase.findByFriendlyId()`. It should look
   // up a customer by their Stellar account and return account information.
 
-  client.query(
+  pool.query(
     "SELECT name,address,dob,domain FROM users WHERE friendlyid = $1", [friendlyId],
     (error, results) => {
       if (error) {
@@ -105,7 +115,7 @@ function screenSender(label, request, response) {
   }
   console.log("sender.domain:", sender.domain);
 
-  client.query(
+  pool.query(
     "SELECT domain,bankname,sanction FROM sanction WHERE domain = $1", [sender.domain],
     (error, results) => {
       if (error) {
@@ -145,7 +155,7 @@ app.post("/compliance/ask_user", function (request, response) {
   screenSender("/compliance/ask_user", request, response);
 });
 
-app.post("/receive", function (request, response) {
+app.post("/receive", async function (request, response) {
   console.log("/receive");
   // The credited amount must be the amount the sender was debited, to the cent.
   // This used to be parseInt(Number(amount).toFixed(2)), which threw away the
@@ -153,8 +163,10 @@ app.post("/receive", function (request, response) {
   // $12.75 and credited the receiver $12.00, destroying $0.75 in transit.
   var amount = parseAmount(request.body.amount);
   var friendlyid = request.body.route;
+  var txId = request.body.transaction_id;
   console.log("amount", amount);
   console.log("friendlyid", friendlyid);
+  console.log("transaction_id", txId);
 
   if (amount === null) {
     console.error("/receive: invalid amount:", request.body.amount);
@@ -166,59 +178,103 @@ app.post("/receive", function (request, response) {
     response.status(400).end("Missing route");
     return;
   }
-  // `receive` may be called multiple times for the same payment, so check that
-  // you haven't already seen this payment ID.
-  var SendObj = JSON.parse(request.body.data);
-  var kycObj = JSON.parse(SendObj.attachment);
-  client.query(
-    "INSERT INTO transactions(txid,sender,receiver,amount,currency,kyc_info) VALUES ($1,$2,$3,$4,$5,$6)",
-    [
-      request.body.transaction_id,
-      SendObj.sender,
-      request.body.route,
-      amount,
-      request.body.asset_code,
-      kycObj.transaction.sender_info,
-    ],
-    (error, results) => {
-      if (error) {
-        console.log(error);
-        response.status(500).end("Error inserting transaction");
-      }
-      if (results) {
-        console.log("REached here", results);
-        client.query(
-          "SELECT balance FROM users WHERE friendlyid = $1", [friendlyid],
-          (error, results) => {
-            if (error) {
-              console.log(error);
-              response.status(500).end("Not found");
-            }
-            if (results) {
-              console.log("results", results);
-              var balance = Number(results.rows[0].balance);
-              balance = balance + +amount;
-              console.log("balance", balance);
+  if (!txId) {
+    // Without a payment id we cannot tell a retry from a new payment, and
+    // crediting an unidentifiable payment is how you double-credit one.
+    console.error("/receive: missing transaction_id");
+    response.status(400).end("Missing transaction_id");
+    return;
+  }
 
-              client.query(
-                "UPDATE users SET balance = $1 WHERE friendlyid = $2", [balance, friendlyid],
-                (error, results) => {
-                  if (error) {
-                    console.log(error);
-                    response.status(500).end("Not found");
-                  }
-                  if (results) {
-                    console.log(results);
-                    response.status(200).end();
-                  }
-                }
-              );
-            }
-          }
-        );
-      }
+  var SendObj;
+  var kycObj;
+  try {
+    SendObj = JSON.parse(request.body.data);
+    kycObj = JSON.parse(SendObj.attachment);
+  } catch (parseError) {
+    console.error("/receive: unparseable payload:", parseError.message);
+    response.status(400).end("Malformed payment payload");
+    return;
+  }
+
+  // The bridge may deliver the same payment more than once (that's what the
+  // original "check that you haven't already seen this payment ID" comment was
+  // asking for, and it was never written). Recording the payment and crediting
+  // the balance therefore have to be one atomic, idempotent unit:
+  //
+  //  - FOR UPDATE locks the receiving account row, so two concurrent deliveries
+  //    of the same payment serialize here instead of both passing the duplicate
+  //    check and both crediting.
+  //  - The credit is `balance = balance + $1`, computed by the database, not a
+  //    read-then-write of a balance we read earlier -- so a concurrent /receive
+  //    or /payment on the same account can't be lost.
+  //  - Everything commits together, or nothing does: we can no longer record a
+  //    transaction we didn't credit, or credit one we didn't record.
+  var db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+
+    var account = await db.query(
+      "SELECT friendlyid FROM users WHERE friendlyid = $1 FOR UPDATE", [friendlyid]
+    );
+    if (account.rowCount === 0) {
+      await db.query("ROLLBACK");
+      console.error("/receive: unknown receiver:", friendlyid);
+      response.status(404).end("Unknown receiver");
+      return;
     }
-  );
+
+    var seen = await db.query("SELECT 1 FROM transactions WHERE txid = $1", [txId]);
+    if (seen.rowCount !== 0) {
+      await db.query("ROLLBACK");
+      // Already credited. Answer 200 so the bridge stops retrying -- this is a
+      // successful delivery of a payment we have already handled, not an error.
+      console.log("/receive: duplicate delivery of", txId, "- already credited");
+      response.status(200).end();
+      return;
+    }
+
+    await db.query(
+      "INSERT INTO transactions(txid,sender,receiver,amount,currency,kyc_info) VALUES ($1,$2,$3,$4,$5,$6)",
+      [
+        txId,
+        SendObj.sender,
+        friendlyid,
+        amount,
+        request.body.asset_code,
+        kycObj.transaction.sender_info,
+      ]
+    );
+
+    await db.query(
+      "UPDATE users SET balance = balance + $1 WHERE friendlyid = $2", [amount, friendlyid]
+    );
+
+    await db.query("COMMIT");
+    console.log("/receive: credited", amount, "to", friendlyid, "for", txId);
+    response.status(200).end();
+  } catch (error) {
+    try {
+      await db.query("ROLLBACK");
+    } catch (rollbackError) {
+      console.error("/receive: rollback failed:", rollbackError.message);
+    }
+
+    // A unique-constraint violation on transactions.txid means a concurrent
+    // delivery of this same payment committed first. It is credited exactly
+    // once, which is the point -- so this is a success, not a failure.
+    // (Requires the UNIQUE constraint on transactions.txid; see FLEET_NOTES.md.)
+    if (error && error.code === "23505") {
+      console.log("/receive: concurrent duplicate of", txId, "- already credited");
+      response.status(200).end();
+      return;
+    }
+
+    console.error("/receive: failed to credit", txId, error);
+    response.status(500).end("Error recording payment");
+  } finally {
+    db.release();
+  }
 });
 
 /*})})*/
