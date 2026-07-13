@@ -19,6 +19,7 @@ const MOCKS = {
   "body-parser": path.join(__dirname, "fakes", "body-parser.js"),
   pg: path.join(__dirname, "fakes", "pg.js"),
   request: path.join(__dirname, "fakes", "request.js"),
+  "node-fetch": path.join(__dirname, "fakes", "node-fetch.js"),
 };
 
 let installed = false;

@@ -79,62 +79,69 @@ app.post("/compliance/fetch_info", function (request, response) {
   );
 });
 
-app.post("/compliance/sanctions", function (request, response) {
-  console.log("/compliance/sanctions");
-  var sender = JSON.parse(request.body.sender);
-  console.log("sender:", sender);
+// Screens the sending financial institution against the `sanction` table and
+// responds 200 (approved) / 403 (denied) per the Stellar compliance protocol.
+//
+// The `sanction` column is an "is this FI sanctioned/permitted to transact with
+// us" flag: only `true` approves. Anything else -- an FI that is flagged false,
+// an FI with no row at all, or a lookup we could not perform -- denies, so the
+// gate fails closed. Every non-200 here blocks the payment at the bridge.
+function screenSender(label, request, response) {
+  console.log(label);
+
+  var sender;
+  try {
+    sender = JSON.parse(request.body.sender);
+  } catch (parseError) {
+    console.error(label, "unparseable sender:", parseError.message);
+    response.status(400).end("Malformed sender");
+    return;
+  }
+  if (!sender || !sender.domain) {
+    console.error(label, "sender has no domain");
+    response.status(400).end("Missing sender domain");
+    return;
+  }
   console.log("sender.domain:", sender.domain);
 
   client.query(
-    "SELECT * FROM sanction WHERE domain = $1", [sender.domain],
+    "SELECT domain,bankname,sanction FROM sanction WHERE domain = $1", [sender.domain],
     (error, results) => {
       if (error) {
-        console.log("status code", 403);
-        response.status(403).end("FI not sanctioned");
-      }
-      if (results) {
-        console.log("status code", 200);
-        response.status(200).end();
-      }
-    }
-  );
-});
-
-app.post("/compliance/ask_user", function (request, response) {
-  console.log("/compliance/ask_user");
-  var sender = JSON.parse(request.body.sender);
-  console.log("sender:", sender);
-  console.log("sender.domain:", sender.domain);
-
-  client.query(
-    "SELECT * FROM sanction WHERE domain = $1", [sender.domain],
-    (error, results) => {
-      if (error) {
-        response.status(403).end("FI not sanctioned");
+        // A screening we could not perform is not a screening that passed.
+        console.error(label, "sanction lookup failed:", error);
+        response.status(500).end("Compliance check failed");
         return;
       }
       console.log("query response rowCount:", results.rowCount);
-      if (results) {
-        if (results.rowCount != 0) {
-          var answer = {
-            domain: results.rows[0].domain, 
-            bankname: results.rows[0].bankname,
-            sanction: results.rows[0].sanction,
-          };
-          console.log("query answer:", answer);
-        }
-        console.log("status code", 200);
-        response.status(200).end();
-        // if (results.rows[0].sanction == true) {
-        //   console.log("KYC request granted, status code", 200);
-        //   response.status(200).end();
-        // } else {
-        //   console.log("KYC request denied, status code", 403);
-        //   response.status(403).end("KYC request denied");
-        // }
+      if (results.rowCount === 0) {
+        console.log(label, "unknown FI, denied, status code", 403);
+        response.status(403).end("Unknown financial institution");
+        return;
       }
+      var row = results.rows[0];
+      console.log("query answer:", {
+        domain: row.domain,
+        bankname: row.bankname,
+        sanction: row.sanction,
+      });
+      if (row.sanction !== true) {
+        console.log(label, "denied, status code", 403);
+        response.status(403).end("Sender denied by sanctions screening");
+        return;
+      }
+      console.log(label, "approved, status code", 200);
+      response.status(200).end();
     }
   );
+}
+
+app.post("/compliance/sanctions", function (request, response) {
+  screenSender("/compliance/sanctions", request, response);
+});
+
+app.post("/compliance/ask_user", function (request, response) {
+  screenSender("/compliance/ask_user", request, response);
 });
 
 app.post("/receive", function (request, response) {
