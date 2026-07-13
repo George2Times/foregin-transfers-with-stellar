@@ -1,0 +1,5 @@
+{
+  "mode": "autonomous",
+  "tasks": ["must-have", "nice-to-have"],
+  "notes": "Enrolled 2026-07-14 after a deep audit (adversarially verified) found real, evidenced financial-correctness and security bugs in this 2021-era demo -- see AI/local/backlog.md. mode=autonomous per explicit user sign-off given in these words: 'yes, enable unattended claude --dangerously-skip-permissions dispatch against foregin-transfers-with-stellar despite the auth/financial-correctness bugs found.'"
+}
