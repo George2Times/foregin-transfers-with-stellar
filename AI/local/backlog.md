@@ -99,8 +99,10 @@ access to finish the job — see `FLEET_NOTES.md`.
 
 ## Nice-to-have
 
-Mostly not touched in the 2026-07-14 pass (out of scope — must-haves only). The two items
-below were finished in the 2026-07-14 follow-up pass; the rest are still open.
+All six are now closed. The first two were done in the 2026-07-14 follow-up pass; the remaining
+four in the 2026-07-14 dependency/duplication pass, in the order that made each one cheaper than
+the last — the A/B deduplication first, so that the pooling and `request` fixes were one edit
+apiece instead of two.
 
 - ~~The pervasive `.then(function(response, error) {...})` pattern (front end and Stellar
   scripts) never actually catches promise rejections — `.then()`'s single callback only ever
@@ -135,26 +137,77 @@ below were finished in the 2026-07-14 follow-up pass; the rest are still open.
   branch returns (including the `23505` duplicate path), and `/payment`'s callbacks all `return`
   after responding. There is no remaining fall-through to harden, so this item is closed as
   already-fixed by the must-have rewrites rather than by new work.
-- `request@2.88.2` (used for the bridge-server HTTP call) is deprecated/unmaintained and pulls
-  in a `tough-cookie` version with a known prototype-pollution CVE (CVE-2023-26136).
-- Each server holds a single non-pooled `pg.Client` with no reconnect logic — a dropped DB
+- ~~`request@2.88.2` (used for the bridge-server HTTP call) is deprecated/unmaintained and pulls
+  in a `tough-cookie` version with a known prototype-pollution CVE (CVE-2023-26136).~~
+  **Fixed** (`5c916fa1`, plus `057addd4` for the front ends). The bridge call now goes through
+  `node-fetch`, which was already a dependency (`CallbacksA/B` use it), so no package was traded
+  for another. Wire format unchanged — still a form-encoded POST, and the tests assert the decoded
+  fields the bridge receives. The `!== 200` check was deliberately *not* widened to fetch's `ok`
+  (any 2xx): that decides whether a payment is refunded, and refunding one the bridge accepted
+  creates money.
+  **Removing `request` alone would not have removed the CVE**, which is the part worth recording:
+  - `react-scripts` → jest → jsdom → `request` → `tough-cookie` pulled it straight back in.
+    `react`/`react-scripts` were declared *production* deps of `infrastructure/` and used by
+    nothing — `pageA`, `pageB` and `my-app` each have their own `package.json`, and this package's
+    only script is `node --test`.
+  - 19 of the 24 declared dependencies (`ajv`, `asn1`, `form-data`, `har-validator`,
+    `json-schema`, `jsprim`, …) were `request`'s own transitive tree, hoisted into the manifest.
+    With `request` gone they were orphans, and three carried *critical* advisories.
+  The manifest now declares the four packages the code actually imports (`express`, `body-parser`,
+  `pg`, `node-fetch`). `tough-cookie` no longer appears anywhere in **`infrastructure/`**'s tree,
+  which went from ~1500 packages to 81 and from 12 advisories (3 critical) to 8.
+  **Still open, deliberately — and `request` is NOT gone from the repo:**
+  - `stellar/package.json` still declares `request@^2.88.2`, and `stellar/federationAtest.js` and
+    `stellar/test_FSA.js` still call it, so CVE-2023-26136 is still live in `stellar/`'s tree. Those
+    are the same two scripts the item above defers ("nobody reads the `error` argument"), and they
+    are untestable here — thin CLI wrappers around a live Stellar network, with no test suite and
+    nothing offline to drive them. Rewriting them onto `fetch` unattended, with no way to run them,
+    is how you break a working script to satisfy an audit. **Whoever picks up that deferred item
+    should drop `request` from `stellar/` at the same time: it is now one job, not two.** The
+    payment servers — the thing that moves customer money — are clean.
+  - The 8 advisories left in `infrastructure/` are express@4's own tree (`qs`, `send`,
+    `serve-static`, `cookie`, `path-to-regexp`) and `node-fetch`. Unrelated to this item, and
+    clearing them means an express 5 / node-fetch 3 upgrade — a breaking change, not something to
+    do unattended.
+  A latent hazard was introduced and caught in the process: `.then(onSent).catch(onFailed)` routes
+  anything the *success* path throws into the refund handler, so a payment the bridge had accepted
+  could still be refunded. Fixed to `.then(onSent, onNotSent)` and pinned by a test (`6ad0df97`).
+- ~~Each server holds a single non-pooled `pg.Client` with no reconnect logic — a dropped DB
   connection permanently breaks the process until manual restart, since nothing ever
-  reconnects after the initial `client.connect()`.
-  *(Half-done: `CallbacksA/B` now use a `pg.Pool`, which reconnects, because `/receive`'s
-  transaction required it. `DBServerA/B` still hold a single `pg.Client`.)*
-- `DBServerA.js`/`DBServerB.js` and `CallbacksA.js`/`CallbacksB.js` are near-byte-for-byte
+  reconnects after the initial `client.connect()`.~~
+  **Fixed** (`2f086967`). `DBServerA/B` now use a `pg.Pool` — which discards a broken connection
+  and opens a new one on the next query — and register an `error` handler, so an idle client
+  erroring out doesn't kill the process with an unhandled event. `CallbacksA/B` already had one
+  (for `/receive`'s transaction), so both halves of each bank now survive a DB bounce the same way.
+  This was **one edit rather than two**, because the handlers had just been deduplicated — the
+  first time that item paid for itself. 6 new sub-tests; all 6 fail against the pre-fix source.
+- ~~`DBServerA.js`/`DBServerB.js` and `CallbacksA.js`/`CallbacksB.js` are near-byte-for-byte
   duplicates (differing only in a few config constants) — every fix, including several in
   `HARDENING.md`, has to be hand-applied twice, with the ever-present risk of only patching
-  one side.
-  *(Still true, and it bit again: every must-have above had to be applied twice. Mitigated for
-  now by regenerating the `B` file from the `A` file so the two provably differ only in their
-  config constants, and by running every test suite against both copies. The real fix — extracting
-  the shared handlers into one module the two files configure — is still worth doing.)*
-- The React front ends' actual payment/account logic (`App.js`'s `setAccount`/`payment`/
+  one side.~~
+  **Fixed** (`80c212ea`). The handlers now live in `dbserver.js` and `callbacks.js`; the four
+  original files are the config that genuinely differs (port, domain, connection string, bridge
+  entry point, txid range). A fix lands on both banks by construction rather than by discipline —
+  the two items above were the first beneficiaries, each a single edit.
+  Behaviour-preserving: no handler logic changed in that commit, and the 113 existing tests passed
+  unmodified — they still load the real `DBServerA/B` and `CallbacksA/B` files and drive the
+  handlers those files register, so the extraction is verified by the same suites that covered the
+  copies. Two dead constants didn't survive the move (`Callbacks`' `domain`, declared in both files
+  and read by neither).
+- ~~The React front ends' actual payment/account logic (`App.js`'s `setAccount`/`payment`/
   `setBank`/`setBalance`) has zero test coverage — the existing tests only cover two small
-  presentational components, not the code that drives money movement.
-  *(Still true. `App.js` was changed substantially by the auth work and is still untested; the
-  server-side equivalents of that logic now are.)*
+  presentational components, not the code that drives money movement.~~
+  **Fixed** (`b9a27044`). 20 tests per page (6 → 26 each), driving the real component methods
+  against a faked `fetch`, so they assert what the browser would actually send and what the user
+  would actually be told: `payment()` refuses an empty receiver and a non-positive/non-numeric
+  amount without troubling the server; it sends the bearer token and **names no account in the
+  body** (naming one used to be all it took to spend someone else's money, so the shape of that
+  hole is now pinned shut); it reports the hash and refreshes the balance on success, surfaces the
+  server's reason on refusal, and tells the user when the server is unreachable (that last one used
+  to fail silently). `login()` won't send half-empty credentials and keeps no token when refused;
+  `setAccount()` drops the token on a 401 rather than leaving the UI looking signed in while every
+  call it makes is refused. The same suite runs against both pages, for the same reason the server
+  suites do.
 
 ## Reference
 - 2021-era demo wiring two toy banks together for cross-border payments over Stellar's old
@@ -170,10 +223,17 @@ below were finished in the 2026-07-14 follow-up pass; the rest are still open.
   list (hardcoded local Postgres creds, a dead hardcoded IP, dev TLS certs, the vendored
   binaries, an unused `my-app` CRA scaffold) — this audit's findings are additional to, not a
   repeat of, that list.
-- No live network, blockchain, or database call was made in the 2026-07-14 pass or its follow-up.
-  All 113 tests (103 from the must-have pass, 10 more from the follow-up's `/test` route suite)
-  run offline against hand-written `pg`/`express`/`request`/`node-fetch` fakes that load the real
-  server files, so the route handlers under test are the committed ones, not re-implementations.
+- No live network, blockchain, or database call was made in the 2026-07-14 pass or either
+  follow-up. All 121 server tests (103 from the must-have pass, 10 from the `/test` route suite,
+  6 for the DB-server pool, 2 for the bridge-refund hazard) run offline against hand-written
+  `pg`/`express`/`node-fetch` fakes that load the real server files, so the route handlers under
+  test are the committed ones, not re-implementations. The `request` fake is gone with the package.
+  The front ends carry 26 Jest tests each (was 6), which do run — only `react-scripts build` is
+  broken on Node 26, not the test runner.
+- The one npm command run against the network was `npm install --package-lock-only` in
+  `infrastructure/`, to regenerate the lockfile after dropping `request`/`react-scripts`. It
+  resolves metadata only and installs nothing; `infrastructure/` still has no `node_modules`, and
+  the test suite doesn't need one.
 - The Stellar scripts under `stellar/` have no tests: they are thin CLI wrappers whose every
   branch is a call to a live Stellar network, so the promise-error fixes there were reviewed and
   syntax-checked but not driven end-to-end. The equivalent fix in `CallbacksA/B`'s `/test` route
