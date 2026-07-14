@@ -293,19 +293,32 @@ app.post("/receive", async function (request, response) {
 /*})})*/
 
 app.post("/test", function (request, response) {
+  // The same broken `.then(function (response, error) {...})` shape the Stellar
+  // scripts had -- `.then` passes only the resolved value, so `error` was always
+  // undefined -- with two extra stings here:
+  //   - the callback's `response` parameter shadowed Express's `response`, so
+  //     the name meant two different objects in two adjacent callbacks;
+  //   - the chain had no `.catch`, so a rejected fetch (the bridge host being
+  //     down is the normal way this fails) sent no reply at all and left the
+  //     caller hanging until its own timeout.
   fetch("http://banka.com/.well-known/stellar.toml")
-    .then(function (response, error) {
-      if (response) {
-        console.log("response", response);
-        return response.text();
+    .then(function (tomlResponse) {
+      if (!tomlResponse.ok) {
+        throw new Error("HTTP " + tomlResponse.status);
       }
+      return tomlResponse.text();
     })
     .then(function (data) {
       console.log("data", data);
-
       response.json({
         data: data,
       });
-      response.end();
+    })
+    .catch(function (error) {
+      console.error("/test: stellar.toml lookup failed:", error);
+      response.status(502).json({
+        msg: "ERROR!",
+        error_msg: "stellar.toml lookup failed",
+      });
     });
 });
