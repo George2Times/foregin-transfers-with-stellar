@@ -170,107 +170,125 @@ app.post("/payment", function (request, response) {
     return;
   }
 
-  {
-    var IdParts = request.body.account.split("*");
-    var ID = IdParts[0];
-    var friendlyid = ID + domain;
-    console.log("friendlyid:", friendlyid);
-    console.log("ID:", ID);
-    console.log("amount:", amount);
+  var IdParts = request.body.account.split("*");
+  var ID = IdParts[0];
+  var friendlyid = ID + domain;
+  console.log("friendlyid:", friendlyid);
+  console.log("ID:", ID);
+  console.log("amount:", amount);
 
-    client.query(
-      "SELECT balance from users where friendlyid = $1", [ID],
-      (error, results) => {
-        if (error) {
-          response.json({
-            msg: "ERROR!",
-            error_msg: error,
-          });
-          response.end();
-          return;
-        }
-        console.log("query response rowCount:", results.rowCount);
-        if (results.rowCount === 0) {
-          // Also a silent hang before: an unknown account got no response.
-          console.log("no such account:", ID);
-          response.status(404).json({ msg: "ERROR!", error_msg: "Account not found" });
-          return;
-        }
-        {
-          balance = results.rows[0].balance;
-          console.log("query response balance:", balance);
-          if (Number(balance) < amount) {
+  // Reserve the funds up front, in one statement, and only then call the bridge.
+  //
+  // The old flow was SELECT balance -> compare -> call the bridge -> SELECT
+  // balance again -> UPDATE to <that value> - amount. Two problems, both of
+  // which let an account spend money it doesn't have:
+  //   - The check and the write were separate statements, so two concurrent
+  //     payments could both read the same balance, both pass the check, and
+  //     both write, each overwriting the other's debit (lost update).
+  //   - The check happened *before* the bridge call and the debit only after
+  //     it came back, so even an atomic debit would leave a window in which a
+  //     second payment passed the check against money the first was spending.
+  //
+  // `UPDATE ... WHERE balance >= $1` does the check and the debit as a single
+  // statement: Postgres takes a row lock, and a concurrent update re-evaluates
+  // the WHERE clause against the already-debited row. rowCount 0 means the
+  // debit did not apply -- no such account, or not enough money. Nothing is
+  // sent to the bridge until the money is provably set aside.
+  client.query(
+    "UPDATE users SET balance = balance - $1 WHERE friendlyid = $2 AND balance >= $1", [amount, ID],
+    (error, results) => {
+      if (error) {
+        console.error("failed to reserve funds:", error);
+        response.status(500).json({ msg: "ERROR!", error_msg: "Database error" });
+        return;
+      }
+
+      if (results.rowCount === 0) {
+        // The debit didn't apply. Work out which of the two reasons it was, so
+        // the caller still gets the 404 / "Insufficient balance!" it expects.
+        client.query(
+          "SELECT balance from users where friendlyid = $1", [ID],
+          (lookupError, lookupResults) => {
+            if (lookupError) {
+              console.error(lookupError);
+              response.status(500).json({ msg: "ERROR!", error_msg: "Database error" });
+              return;
+            }
+            if (lookupResults.rowCount === 0) {
+              console.log("no such account:", ID);
+              response.status(404).json({ msg: "ERROR!", error_msg: "Account not found" });
+              return;
+            }
+            console.log("insufficient balance:", lookupResults.rows[0].balance, "<", amount);
             response.json({
               msg: "ERROR!",
               error_msg: "Insufficient balance!",
             });
             response.end();
-            return;
           }
-          var paymentRequestForm = {
-            id: txid.toString(),
-            amount: amount,
-            asset_code: USD,
-            asset_issuer: issuer,
-            destination: request.body.receiver,
-            sender: friendlyid,
-            use_compliance: true,
-          };
-          console.log("paymentRequestForm:", paymentRequestForm);
-          requestObj.post({
-              url: entryPointBS,
-              form: paymentRequestForm,
-            },
-            function (err, res, body) {
-              if (err || res.statusCode !== 200) {
-                console.error("ERROR!", err || body);
+        );
+        return;
+      }
+
+      // Take a payment id now rather than after a successful send: two
+      // concurrent payments used to build their request with the same `txid`
+      // and only bump the counter on success, so they collided.
+      var paymentId = txid++;
+      console.log("Next txid", txid);
+
+      var paymentRequestForm = {
+        id: paymentId.toString(),
+        amount: amount,
+        asset_code: USD,
+        asset_issuer: issuer,
+        destination: request.body.receiver,
+        sender: friendlyid,
+        use_compliance: true,
+      };
+      console.log("paymentRequestForm:", paymentRequestForm);
+      requestObj.post({
+          url: entryPointBS,
+          form: paymentRequestForm,
+        },
+        function (err, res, body) {
+          if (err || res.statusCode !== 200) {
+            // The money never left. Put the reservation back.
+            console.error("ERROR!", err || body);
+            client.query(
+              "UPDATE users SET balance = balance + $1 WHERE friendlyid = $2", [amount, ID],
+              (refundError) => {
+                if (refundError) {
+                  // The debit stuck, the send failed, and the refund failed too:
+                  // the balance is now short by `amount` with nothing to show
+                  // for it. Nothing here can fix that, so say so loudly rather
+                  // than let it look like an ordinary failed request.
+                  console.error(
+                    "CRITICAL: failed to refund reserved funds after a failed payment.",
+                    "account:", ID, "amount:", amount, "txid:", paymentId,
+                    refundError
+                  );
+                }
                 response.json({
                   result: body,
                   msg: "ERROR!",
                   error_msg: err,
                 });
                 response.end();
-              } else {
-                console.log("SUCCESS!", body);
-                client.query(
-                  "SELECT balance from users where friendlyid = $1", [ID],
-                  (error, results) => {
-                    if (error) {
-                      console.log(error);
-                      response.status(500).end("User Not found");
-                    }
-                    if (results) {
-                      var balance = Number(results.rows[0].balance);
-                      balance = balance - amount;
-                      console.log("update ID, balance:", ID, ",", balance);
-                      client.query(
-                        "UPDATE users set balance = $1 where friendlyid = $2", [balance, ID],
-                        (error, results) => {
-                          if (error) {
-                            console.log(error);
-                            response.status(500).end("User Not found");
-                          }
-                          if (results) {
-                            response.json({
-                              result: body,
-                              msg: "SUCCESS!",
-                            });
-                            txid++;
-                            console.log("Next txid", txid);
-                            response.status(200).end();
-                          }
-                        }
-                      );
-                    }
-                  }
-                );
               }
-            }
-          );
+            );
+            return;
+          }
+
+          console.log("SUCCESS!", body);
+          response.json({
+            result: body,
+            msg: "SUCCESS!",
+          });
+          response.end();
         }
-      }
-    );
-  }
+      );
+    }
+  );
 });
 
 app.get("/bankuser", function (request, response) {

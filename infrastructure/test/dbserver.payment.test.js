@@ -67,6 +67,9 @@ for (const { file, account, receiver } of SERVERS) {
 
     await t.test("insufficient balance: responds once, never calls the bridge", async () => {
       fresh();
+      // The conditional debit matches no row (balance >= 500 is false)...
+      client.queueResponse({ error: null, results: { rowCount: 0, rows: [] } });
+      // ...and the follow-up lookup shows the account exists, just short.
       client.queueResponse({ error: null, results: { rowCount: 1, rows: [{ balance: 10 }] } });
 
       const res = await call(paymentRequest({ amount: "500" }));
@@ -87,7 +90,8 @@ for (const { file, account, receiver } of SERVERS) {
 
     await t.test("unknown account: 404s instead of hanging", async () => {
       fresh();
-      client.queueResponse({ error: null, results: { rowCount: 0, rows: [] } });
+      client.queueResponse({ error: null, results: { rowCount: 0, rows: [] } }); // debit matches nothing
+      client.queueResponse({ error: null, results: { rowCount: 0, rows: [] } }); // no such account
 
       const res = await call(paymentRequest({ account: "nobody*banka.com" }));
 
@@ -137,14 +141,12 @@ for (const { file, account, receiver } of SERVERS) {
 
     await t.test("sufficient balance: calls the bridge and reports success", async () => {
       fresh();
-      client.queueResponse({ error: null, results: { rowCount: 1, rows: [{ balance: 5000 }] } });
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // funds reserved
       requestFake.queueResponse({
         err: null,
         res: { statusCode: 200 },
         body: JSON.stringify({ hash: "abc123" }),
       });
-      client.queueResponse({ error: null, results: { rowCount: 1, rows: [{ balance: 5000 }] } });
-      client.queueResponse({ error: null, results: { rowCount: 1, rows: [{}] } });
 
       const res = await call(paymentRequest({ amount: "100" }));
 
@@ -156,14 +158,12 @@ for (const { file, account, receiver } of SERVERS) {
 
     await t.test("a fractional amount reaches the bridge intact", async () => {
       fresh();
-      client.queueResponse({ error: null, results: { rowCount: 1, rows: [{ balance: 5000 }] } });
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // funds reserved
       requestFake.queueResponse({
         err: null,
         res: { statusCode: 200 },
         body: JSON.stringify({ hash: "abc123" }),
       });
-      client.queueResponse({ error: null, results: { rowCount: 1, rows: [{ balance: 5000 }] } });
-      client.queueResponse({ error: null, results: { rowCount: 1, rows: [{}] } });
 
       await call(paymentRequest({ amount: "12.75" }));
 
@@ -172,6 +172,102 @@ for (const { file, account, receiver } of SERVERS) {
         12.75,
         "the cents must survive the sending side too"
       );
+    });
+
+    await t.test("debits with one conditional statement, not a read-then-write", async () => {
+      fresh();
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } });
+      requestFake.queueResponse({
+        err: null,
+        res: { statusCode: 200 },
+        body: JSON.stringify({ hash: "abc123" }),
+      });
+
+      await call(paymentRequest({ amount: "100" }));
+
+      const debit = client.queries[0];
+      assert.match(
+        debit.sql,
+        /UPDATE users SET balance = balance - \$1 WHERE friendlyid = \$2 AND balance >= \$1/,
+        "the balance check and the debit must be a single statement, so two " +
+          "concurrent payments can't both pass the check against the same balance"
+      );
+      assert.deepEqual(debit.params, [100, account.split("*")[0]]);
+    });
+
+    await t.test("reserves the funds BEFORE calling the bridge", async () => {
+      fresh();
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } });
+      requestFake.queueResponse({
+        err: null,
+        res: { statusCode: 200 },
+        body: JSON.stringify({ hash: "abc123" }),
+      });
+
+      await call(paymentRequest({ amount: "100" }));
+
+      // Nothing may be sent to the bridge until the money is provably set
+      // aside; otherwise the gap between "checked" and "debited" is a window
+      // for a second payment to spend the same balance.
+      assert.match(client.queries[0].sql, /UPDATE users SET balance = balance -/);
+      assert.equal(requestFake.calls.length, 1);
+    });
+
+    await t.test("refunds the reservation when the bridge fails", async () => {
+      fresh();
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // debit applied
+      requestFake.queueResponse({
+        err: new Error("bridge unreachable"),
+        res: undefined,
+        body: undefined,
+      });
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // refund
+
+      const res = await call(paymentRequest({ amount: "100" }));
+
+      const refund = client.queries[client.queries.length - 1];
+      assert.match(
+        refund.sql,
+        /UPDATE users SET balance = balance \+ \$1 WHERE friendlyid = \$2/,
+        "a payment that never left must not stay debited"
+      );
+      assert.deepEqual(refund.params, [100, account.split("*")[0]]);
+      assert.equal(res.lastJson.msg, "ERROR!");
+    });
+
+    await t.test("refunds the reservation when the bridge rejects the payment", async () => {
+      fresh();
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // debit applied
+      requestFake.queueResponse({
+        err: null,
+        res: { statusCode: 500 },
+        body: "bridge said no",
+      });
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // refund
+
+      const res = await call(paymentRequest({ amount: "100" }));
+
+      assert.match(
+        client.queries[client.queries.length - 1].sql,
+        /UPDATE users SET balance = balance \+ \$1/,
+        "a non-200 from the bridge means the money never left"
+      );
+      assert.equal(res.lastJson.msg, "ERROR!");
+    });
+
+    await t.test("still responds if the refund itself fails", async () => {
+      fresh();
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // debit applied
+      requestFake.queueResponse({
+        err: new Error("bridge unreachable"),
+        res: undefined,
+        body: undefined,
+      });
+      client.queueResponse({ error: new Error("db gone"), results: null }); // refund fails
+
+      const res = await call(paymentRequest({ amount: "100" }));
+
+      assert.equal(res.lastJson.msg, "ERROR!", "the caller must still get an answer");
     });
   });
 }
