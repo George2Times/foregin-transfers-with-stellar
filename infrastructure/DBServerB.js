@@ -3,6 +3,7 @@ const bodyParser = require("body-parser");
 const app = express();
 const requestObj = require("request");
 const pg = require("pg");
+const { parseAmount } = require("./money");
 
 // ==== Config ====
 var listened_port = 3602;
@@ -54,7 +55,11 @@ var server = app.listen(process.env.PORT || listened_port, function () {
 app.post("/userdet", function (request, response) {
   console.log("/userdet: ");
   if(!request.body.friendlyid) {
+    // Previously this logged and returned without sending anything, leaving
+    // the caller's request hanging until its own timeout. Every path through
+    // a route handler has to end in a response.
     console.log("request.body.friendlyid:", request.body.friendlyid);
+    response.status(400).json({ msg: "ERROR!", error_msg: "Missing friendlyid" });
   } else {
     var IdParts = request.body.friendlyid.split("*");
     var ID = IdParts[0];
@@ -95,7 +100,9 @@ app.post("/userdet", function (request, response) {
 app.post("/userbal", function (request, response) {
   console.log("/userbal: ");
   if(!request.body.friendlyid) {
+    // Same silent hang as /userdet: respond instead of falling off the end.
     console.log("request.body.friendlyid:", request.body.friendlyid);
+    response.status(400).json({ msg: "ERROR!", error_msg: "Missing friendlyid" });
   } else {
     var IdParts = request.body.friendlyid.split("*");
     var ID = IdParts[0];
@@ -133,14 +140,43 @@ app.post("/userbal", function (request, response) {
 
 app.post("/payment", function (request, response) {
   console.log("/payment: ");
-  if(!request.body.account) {
+
+  // Every one of these used to fall off the end of the handler with no
+  // response at all, hanging the caller until its own timeout.
+  if (!request.body.account) {
     console.log("request.body.account:", request.body.account);
-  } else {
+    response.status(400).json({ msg: "ERROR!", error_msg: "Missing account" });
+    return;
+  }
+  if (!request.body.receiver) {
+    console.log("request.body.receiver:", request.body.receiver);
+    response.status(400).json({ msg: "ERROR!", error_msg: "Missing receiver" });
+    return;
+  }
+
+  // The amount was previously used unvalidated. `balance < Number(amount)` is
+  // false for a negative amount, so the balance check passed, and the debit
+  // `balance + -amount` then *raised* the sender's balance -- a negative
+  // transfer was free money. A non-numeric amount made that expression NaN and
+  // wrote NaN into the balance column. Both are rejected here, before anything
+  // reaches the bridge.
+  var amount = parseAmount(request.body.amount);
+  if (amount === null) {
+    console.log("invalid amount:", request.body.amount);
+    response.status(400).json({
+      msg: "ERROR!",
+      error_msg: "Amount must be a positive number",
+    });
+    return;
+  }
+
+  {
     var IdParts = request.body.account.split("*");
     var ID = IdParts[0];
     var friendlyid = ID + domain;
     console.log("friendlyid:", friendlyid);
     console.log("ID:", ID);
+    console.log("amount:", amount);
 
     client.query(
       "SELECT balance from users where friendlyid = $1", [ID],
@@ -154,10 +190,16 @@ app.post("/payment", function (request, response) {
           return;
         }
         console.log("query response rowCount:", results.rowCount);
-        if (results.rowCount != 0) {
+        if (results.rowCount === 0) {
+          // Also a silent hang before: an unknown account got no response.
+          console.log("no such account:", ID);
+          response.status(404).json({ msg: "ERROR!", error_msg: "Account not found" });
+          return;
+        }
+        {
           balance = results.rows[0].balance;
           console.log("query response balance:", balance);
-          if (balance < Number(request.body.amount)) {
+          if (Number(balance) < amount) {
             response.json({
               msg: "ERROR!",
               error_msg: "Insufficient balance!",
@@ -167,7 +209,7 @@ app.post("/payment", function (request, response) {
           }
           var paymentRequestForm = {
             id: txid.toString(),
-            amount: request.body.amount,
+            amount: amount,
             asset_code: USD,
             asset_issuer: issuer,
             destination: request.body.receiver,
@@ -199,7 +241,7 @@ app.post("/payment", function (request, response) {
                     }
                     if (results) {
                       var balance = Number(results.rows[0].balance);
-                      balance = balance + -request.body.amount;
+                      balance = balance - amount;
                       console.log("update ID, balance:", ID, ",", balance);
                       client.query(
                         "UPDATE users set balance = $1 where friendlyid = $2", [balance, ID],

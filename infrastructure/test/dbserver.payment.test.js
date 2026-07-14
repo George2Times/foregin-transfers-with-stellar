@@ -1,170 +1,177 @@
-// Offline regression tests for the /payment route in DBServerA.js and
-// DBServerB.js.
+// Offline tests for the /payment route in DBServerA.js and DBServerB.js.
 //
-// These exercise the real route handler functions from the committed
-// source files (not a re-implementation), using hand-written in-memory
-// fakes for `pg`, `express`, `body-parser` and `request` (see ./fakes and
-// ./mockRequire.js). No real Postgres, HTTP server, or network call is
-// involved, and no real npm packages need to be installed.
+// These exercise the real route handlers from the committed source files (not a
+// re-implementation), using hand-written in-memory fakes for `pg`, `express`,
+// `body-parser` and `request` (see ./fakes and ./mockRequire.js). No real
+// Postgres, HTTP server, or network call is involved.
 //
-// Run with:  node --test infrastructure/test
+// The same suite runs against both files. They are near-identical copies of each
+// other, and every bug found in this endpoint so far has been present in both,
+// so testing one and eyeballing the other is how a fix ends up half-applied.
 //
-// Background: the original /payment handler was missing `return`
-// statements after it sent an error response for (a) a DB error and
-// (b) insufficient balance. Because of that, execution fell through and
-// the handler went on to build a payment request and POST it to the
-// bridge server anyway, then tried to end the same HTTP response a
-// second time. These tests pin down the fixed behavior: on error or
-// insufficient balance, the handler must respond exactly once and must
-// never call out to the bridge server.
+// Bugs pinned here:
+//   - Missing `return` after the insufficient-balance / DB-error responses, so
+//     the handler paid out anyway (fixed in the previous hardening pass).
+//   - No validation of `amount`: a negative amount passed the balance check and
+//     *increased* the sender's balance; a non-numeric one wrote NaN.
+//   - Missing fields and unknown accounts produced no HTTP response at all --
+//     the caller hung until its own timeout.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const path = require("path");
 
-const { installMockRequire } = require("./mockRequire");
-installMockRequire();
-
-const express = require("./fakes/express");
-const { Client } = require("./fakes/pg");
+const { loadServer, waitFor, settle } = require("./helpers");
 const requestFake = require("./fakes/request");
 const { makeFakeResponse } = require("./fakes/response");
 
-function waitFor(predicate, { timeout = 1000, interval = 5 } = {}) {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    (function check() {
-      if (predicate()) return resolve();
-      if (Date.now() - start > timeout) {
-        return reject(new Error("waitFor: timed out waiting for condition"));
+const SERVERS = [
+  { file: "DBServerA.js", account: "alice*banka.com", receiver: "bob*bankb.com" },
+  { file: "DBServerB.js", account: "carol*bankb.com", receiver: "dave*banka.com" },
+];
+
+for (const { file, account, receiver } of SERVERS) {
+  test(`${file} /payment`, async (t) => {
+    const { client, app } = loadServer(file);
+    const handler = app._getRoute("post", "/payment");
+    assert.ok(typeof handler === "function", "/payment route must be registered");
+
+    function paymentRequest(overrides = {}) {
+      return {
+        body: Object.assign({ account, receiver, amount: "100" }, overrides),
+      };
+    }
+
+    // Clears recorded queries/bridge calls and any unconsumed programmed
+    // results. Call before queueing a case's responses, not after.
+    function fresh() {
+      client.reset();
+      requestFake.reset();
+    }
+
+    // Drives the handler and waits for it to answer. Fails loudly (rather than
+    // hanging the test run) if it never does -- which is the bug for several of
+    // the cases below.
+    async function call(req) {
+      const res = makeFakeResponse();
+      handler(req, res);
+      await waitFor(() => res.endCount > 0 || res.lastJson !== undefined, {
+        timeout: 500,
+      }).catch(() => {
+        throw new Error("handler never sent a response (the caller would hang)");
+      });
+      // Let any accidental extra async work run, so a handler that wrongly keeps
+      // going after responding is caught.
+      await settle();
+      return res;
+    }
+
+    await t.test("insufficient balance: responds once, never calls the bridge", async () => {
+      fresh();
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [{ balance: 10 }] } });
+
+      const res = await call(paymentRequest({ amount: "500" }));
+
+      assert.equal(requestFake.calls.length, 0, "must not call the bridge when funds are short");
+      assert.equal(res.lastJson.error_msg, "Insufficient balance!");
+    });
+
+    await t.test("DB error looking up balance: responds once, never calls the bridge", async () => {
+      fresh();
+      client.queueResponse({ error: new Error("connection lost"), results: null });
+
+      const res = await call(paymentRequest());
+
+      assert.equal(requestFake.calls.length, 0, "must not call the bridge on a DB error");
+      assert.equal(res.lastJson.msg, "ERROR!");
+    });
+
+    await t.test("unknown account: 404s instead of hanging", async () => {
+      fresh();
+      client.queueResponse({ error: null, results: { rowCount: 0, rows: [] } });
+
+      const res = await call(paymentRequest({ account: "nobody*banka.com" }));
+
+      assert.equal(res.statusCode, 404);
+      assert.equal(requestFake.calls.length, 0);
+    });
+
+    await t.test("missing fields: 400s instead of hanging", async () => {
+      for (const [label, overrides] of [
+        ["missing account", { account: undefined }],
+        ["missing receiver", { receiver: undefined }],
+        ["missing amount", { amount: undefined }],
+      ]) {
+        fresh();
+        const res = await call(paymentRequest(overrides));
+
+        assert.equal(res.statusCode, 400, `${label} must be a 400`);
+        assert.equal(client.queries.length, 0, `${label} must not reach the database`);
+        assert.equal(requestFake.calls.length, 0, `${label} must not reach the bridge`);
       }
-      setTimeout(check, interval);
-    })();
+    });
+
+    await t.test("NEGATIVE amount is rejected (it used to credit the sender)", async () => {
+      // The old code: `balance < Number("-100")` is false, so the balance check
+      // passed; the debit was `balance + -amount`, i.e. balance - (-100), which
+      // *added* 100 to the sender's balance. A negative transfer was free money.
+      for (const amount of ["-100", "-0.01", -100]) {
+        fresh();
+        const res = await call(paymentRequest({ amount }));
+
+        assert.equal(res.statusCode, 400, `amount ${amount} must be rejected`);
+        assert.equal(client.queries.length, 0, "must not touch the balance");
+        assert.equal(requestFake.calls.length, 0, "must not call the bridge");
+      }
+    });
+
+    await t.test("NON-NUMERIC amount is rejected (it used to write NaN)", async () => {
+      for (const amount of ["abc", "", "  ", {}, true, "1e", "0", "0.00"]) {
+        fresh();
+        const res = await call(paymentRequest({ amount }));
+
+        assert.equal(res.statusCode, 400, `amount ${JSON.stringify(amount)} must be rejected`);
+        assert.equal(client.queries.length, 0, "must not touch the balance");
+        assert.equal(requestFake.calls.length, 0, "must not call the bridge");
+      }
+    });
+
+    await t.test("sufficient balance: calls the bridge and reports success", async () => {
+      fresh();
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [{ balance: 5000 }] } });
+      requestFake.queueResponse({
+        err: null,
+        res: { statusCode: 200 },
+        body: JSON.stringify({ hash: "abc123" }),
+      });
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [{ balance: 5000 }] } });
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [{}] } });
+
+      const res = await call(paymentRequest({ amount: "100" }));
+
+      assert.equal(requestFake.calls.length, 1, "bridge must be called exactly once");
+      assert.equal(Number(requestFake.calls[0].form.amount), 100);
+      assert.equal(requestFake.calls[0].form.destination, receiver);
+      assert.equal(res.lastJson.msg, "SUCCESS!");
+    });
+
+    await t.test("a fractional amount reaches the bridge intact", async () => {
+      fresh();
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [{ balance: 5000 }] } });
+      requestFake.queueResponse({
+        err: null,
+        res: { statusCode: 200 },
+        body: JSON.stringify({ hash: "abc123" }),
+      });
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [{ balance: 5000 }] } });
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [{}] } });
+
+      await call(paymentRequest({ amount: "12.75" }));
+
+      assert.equal(
+        Number(requestFake.calls[0].form.amount),
+        12.75,
+        "the cents must survive the sending side too"
+      );
+    });
   });
 }
-
-// Loads one of the server files fresh and returns the fake `app` and
-// `client` instances it created, so a test can reach into its route
-// handlers and control what the "database" returns.
-function loadServer(fileName) {
-  const modulePath = path.join(__dirname, "..", fileName);
-  const clientCountBefore = Client.instances.length;
-  const appCountBefore = express.instances.length;
-
-  delete require.cache[require.resolve(modulePath)];
-  require(modulePath);
-
-  const client = Client.instances[clientCountBefore];
-  const app = express.instances[appCountBefore];
-  return { client, app };
-}
-
-test("DBServerA /payment", async (t) => {
-  const { client, app } = loadServer("DBServerA.js");
-  const handler = app._getRoute("post", "/payment");
-  assert.ok(typeof handler === "function", "/payment route must be registered");
-
-  await t.test("insufficient balance: responds once, never calls the bridge", async () => {
-    client.reset();
-    requestFake.reset();
-    client.queueResponse({
-      error: null,
-      results: { rowCount: 1, rows: [{ balance: 10 }] },
-    });
-
-    const req = {
-      body: { account: "alice*banka.com", amount: "500", receiver: "bob*bankb.com" },
-    };
-    const res = makeFakeResponse();
-
-    handler(req, res);
-    await waitFor(() => res.endCount > 0);
-    // give any accidental extra async work a chance to run before asserting
-    await new Promise((resolve) => setImmediate(resolve));
-
-    assert.equal(requestFake.calls.length, 0, "bridge server must not be called when balance is insufficient");
-    assert.equal(res.endCount, 1, "response must be ended exactly once");
-    assert.equal(res.lastJson.msg, "ERROR!");
-    assert.equal(res.lastJson.error_msg, "Insufficient balance!");
-  });
-
-  await t.test("DB error looking up balance: responds once, never calls the bridge", async () => {
-    client.reset();
-    requestFake.reset();
-    client.queueResponse({ error: new Error("connection lost"), results: null });
-
-    const req = {
-      body: { account: "alice*banka.com", amount: "500", receiver: "bob*bankb.com" },
-    };
-    const res = makeFakeResponse();
-
-    handler(req, res);
-    await waitFor(() => res.endCount > 0);
-    await new Promise((resolve) => setImmediate(resolve));
-
-    assert.equal(requestFake.calls.length, 0, "bridge server must not be called on a DB error");
-    assert.equal(res.endCount, 1, "response must be ended exactly once");
-    assert.equal(res.lastJson.msg, "ERROR!");
-  });
-
-  await t.test("sufficient balance: calls the bridge and reports success", async () => {
-    client.reset();
-    requestFake.reset();
-    client.queueResponse({
-      error: null,
-      results: { rowCount: 1, rows: [{ balance: 5000 }] },
-    });
-    requestFake.queueResponse({
-      err: null,
-      res: { statusCode: 200 },
-      body: JSON.stringify({ hash: "abc123" }),
-    });
-    client.queueResponse({
-      error: null,
-      results: { rowCount: 1, rows: [{ balance: 5000 }] },
-    });
-    client.queueResponse({ error: null, results: { rowCount: 1, rows: [{}] } });
-
-    const req = {
-      body: { account: "alice*banka.com", amount: "100", receiver: "bob*bankb.com" },
-    };
-    const res = makeFakeResponse();
-
-    handler(req, res);
-    await waitFor(() => res.endCount > 0);
-
-    assert.equal(requestFake.calls.length, 1, "bridge server must be called exactly once");
-    assert.equal(requestFake.calls[0].form.amount, "100");
-    assert.equal(requestFake.calls[0].form.destination, "bob*bankb.com");
-    assert.equal(res.lastJson.msg, "SUCCESS!");
-    assert.equal(res.endCount, 1, "response must be ended exactly once");
-  });
-});
-
-test("DBServerB /payment (same fix, mirrored file)", async (t) => {
-  const { client, app } = loadServer("DBServerB.js");
-  const handler = app._getRoute("post", "/payment");
-  assert.ok(typeof handler === "function", "/payment route must be registered");
-
-  await t.test("insufficient balance: responds once, never calls the bridge", async () => {
-    client.reset();
-    requestFake.reset();
-    client.queueResponse({
-      error: null,
-      results: { rowCount: 1, rows: [{ balance: 5 }] },
-    });
-
-    const req = {
-      body: { account: "carol*bankb.com", amount: "999", receiver: "dave*banka.com" },
-    };
-    const res = makeFakeResponse();
-
-    handler(req, res);
-    await waitFor(() => res.endCount > 0);
-    await new Promise((resolve) => setImmediate(resolve));
-
-    assert.equal(requestFake.calls.length, 0, "bridge server must not be called when balance is insufficient");
-    assert.equal(res.endCount, 1, "response must be ended exactly once");
-    assert.equal(res.lastJson.error_msg, "Insufficient balance!");
-  });
-});
