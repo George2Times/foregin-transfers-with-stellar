@@ -20,7 +20,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { loadServer, waitFor, settle, authHeader } = require("./helpers");
+const { loadServer, waitFor, settle, authHeader, audienceFor } = require("./helpers");
 const fetchFake = require("./fakes/node-fetch");
 const { makeFakeResponse } = require("./fakes/response");
 
@@ -42,7 +42,7 @@ for (const { file, account, receiver } of SERVERS) {
     function paymentRequest(overrides = {}) {
       const { headers, ...body } = overrides;
       return {
-        headers: headers === undefined ? authHeader(senderId) : headers,
+        headers: headers === undefined ? authHeader(senderId, audienceFor(file)) : headers,
         body: Object.assign({ receiver, amount: "100" }, body),
       };
     }
@@ -100,7 +100,7 @@ for (const { file, account, receiver } of SERVERS) {
       client.queueResponse({ error: null, results: { rowCount: 0, rows: [] } }); // no such account
 
       const res = await call({
-        headers: authHeader("nobody"),
+        headers: authHeader("nobody", audienceFor(file)),
         body: { receiver, amount: "100" },
       });
 

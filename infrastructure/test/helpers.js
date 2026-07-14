@@ -87,11 +87,30 @@ function settle() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+// The audience each bank mints its tokens for: its federation domain, the same
+// value DBServerA.js / DBServerB.js pass to createDbServer as `domain`. Nothing
+// keeps this map in step with those files, and nothing needs to -- get it wrong
+// and every authenticated request in every suite comes back 401.
+const AUDIENCE = {
+  "DBServerA.js": "*banka.com",
+  "DBServerB.js": "*bankb.com",
+};
+
+function audienceFor(file) {
+  const audience = AUDIENCE[file];
+  if (!audience) throw new Error("helpers: no audience known for " + file);
+  return audience;
+}
+
 // Builds the Authorization header a request needs to reach a protected route,
-// signed with the same secret the loaded servers are using.
-function authHeader(friendlyid) {
+// signed with the same secret the loaded servers are using. `audience` is which
+// bank the token is good at -- pass audienceFor(theServerFileUnderTest), or one
+// deliberately belonging to the *other* bank to check that it is turned away.
+function authHeader(friendlyid, audience) {
   const auth = require("../auth");
-  return { authorization: "Bearer " + auth.issueToken(friendlyid, TEST_SESSION_SECRET) };
+  return {
+    authorization: "Bearer " + auth.issueToken(friendlyid, TEST_SESSION_SECRET, audience),
+  };
 }
 
 module.exports = {
@@ -100,5 +119,6 @@ module.exports = {
   waitFor,
   settle,
   authHeader,
+  audienceFor,
   TEST_SESSION_SECRET,
 };

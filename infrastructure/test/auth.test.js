@@ -13,7 +13,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { loadServer, waitFor, settle, authHeader, TEST_SESSION_SECRET } = require("./helpers");
+const {
+  loadServer,
+  waitFor,
+  settle,
+  authHeader,
+  audienceFor,
+  TEST_SESSION_SECRET,
+} = require("./helpers");
 const fetchFake = require("./fakes/node-fetch");
 const { makeFakeResponse } = require("./fakes/response");
 const auth = require("../auth");
@@ -82,38 +89,43 @@ test("password hashing", async (t) => {
 
 test("tokens", async (t) => {
   const secret = "a-secret-that-is-long-enough";
+  const BANK_A = "*banka.com";
+  const BANK_B = "*bankb.com";
 
   await t.test("round-trips the account it was issued for", () => {
-    const token = auth.issueToken("alice", secret);
-    assert.equal(auth.verifyToken(token, secret).sub, "alice");
+    const token = auth.issueToken("alice", secret, BANK_A);
+    assert.equal(auth.verifyToken(token, secret, BANK_A).sub, "alice");
   });
 
   await t.test("rejects a token signed with a different secret", () => {
-    const token = auth.issueToken("alice", "some-other-secret-entirely");
-    assert.equal(auth.verifyToken(token, secret), null);
+    const token = auth.issueToken("alice", "some-other-secret-entirely", BANK_A);
+    assert.equal(auth.verifyToken(token, secret, BANK_A), null);
   });
 
   await t.test("rejects a token whose payload was edited", () => {
     // The whole point: a client must not be able to rewrite `sub` to another
     // account and have the server believe it.
-    const token = auth.issueToken("alice", secret);
+    const token = auth.issueToken("alice", secret, BANK_A);
     const signature = token.split(".")[1];
-    const forgedPayload = Buffer.from(JSON.stringify({ sub: "bob", exp: 9999999999 }))
+    const forgedPayload = Buffer.from(JSON.stringify({ sub: "bob", aud: BANK_A, exp: 9999999999 }))
       .toString("base64")
       .replace(/\+/g, "-")
       .replace(/\//g, "_")
       .replace(/=+$/, "");
 
-    assert.equal(auth.verifyToken(forgedPayload + "." + signature, secret), null);
+    assert.equal(auth.verifyToken(forgedPayload + "." + signature, secret, BANK_A), null);
   });
 
   await t.test("rejects an expired token", () => {
     const issuedLongAgo = 1000;
-    const token = auth.issueToken("alice", secret, issuedLongAgo);
+    const token = auth.issueToken("alice", secret, BANK_A, issuedLongAgo);
 
-    assert.ok(auth.verifyToken(token, secret, issuedLongAgo + 60), "still valid a minute later");
+    assert.ok(
+      auth.verifyToken(token, secret, BANK_A, issuedLongAgo + 60),
+      "still valid a minute later"
+    );
     assert.equal(
-      auth.verifyToken(token, secret, issuedLongAgo + auth.TOKEN_TTL_SECONDS + 1),
+      auth.verifyToken(token, secret, BANK_A, issuedLongAgo + auth.TOKEN_TTL_SECONDS + 1),
       null,
       "must not still be valid past its expiry"
     );
@@ -121,8 +133,77 @@ test("tokens", async (t) => {
 
   await t.test("rejects malformed tokens instead of throwing", () => {
     for (const bad of [null, undefined, "", "garbage", "a.b.c", "....", 42, {}]) {
-      assert.equal(auth.verifyToken(bad, secret), null, `token: ${JSON.stringify(bad)}`);
+      assert.equal(auth.verifyToken(bad, secret, BANK_A), null, `token: ${JSON.stringify(bad)}`);
     }
+  });
+
+  // ------------------------------------------------------------- audience
+
+  await t.test("a token is not accepted by the bank it wasn't issued for", () => {
+    // Even on the SAME secret, which is the case that matters: FLEET_NOTES.md
+    // asks for a separate SESSION_SECRET per bank, but nothing in the code could
+    // enforce that or notice it being ignored, and the two banks have separate
+    // databases in which the same friendly ID is a different customer with
+    // different money.
+    const token = auth.issueToken("alice", secret, BANK_A);
+
+    assert.ok(auth.verifyToken(token, secret, BANK_A), "good at the bank that issued it");
+    assert.equal(
+      auth.verifyToken(token, secret, BANK_B),
+      null,
+      "a token minted by bank A must not authenticate anyone at bank B"
+    );
+  });
+
+  await t.test("the audience cannot be edited by whoever holds the token", () => {
+    // It's inside the signed payload, so re-pointing it invalidates the
+    // signature -- there is no way to launder a bank A token into a bank B one.
+    const token = auth.issueToken("alice", secret, BANK_A);
+    const forged =
+      Buffer.from(JSON.stringify({ sub: "alice", aud: BANK_B, exp: 9999999999 }))
+        .toString("base64")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "") +
+      "." +
+      token.split(".")[1];
+
+    assert.equal(auth.verifyToken(forged, secret, BANK_B), null);
+  });
+
+  await t.test("a token with no audience at all is refused", () => {
+    // The shape tokens had before this: {sub, exp} and nothing else. Correctly
+    // signed, unexpired -- and good at every bank that shares the secret, which
+    // is exactly what must stop being true. They last an hour, so refusing them
+    // costs one re-login.
+    const payload = Buffer.from(JSON.stringify({ sub: "alice", exp: 9999999999 }))
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    const legacy =
+      payload +
+      "." +
+      require("crypto")
+        .createHmac("sha256", secret)
+        .update(payload)
+        .digest("base64")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+
+    assert.equal(auth.verifyToken(legacy, secret, BANK_A), null, "an audience-less token is dead");
+  });
+
+  await t.test("refuses to mint or check a token with no audience named", () => {
+    // A caller that forgot which bank it is must not thereby get a skeleton key,
+    // nor start accepting every bank's tokens. Fail closed, both directions.
+    assert.throws(() => auth.issueToken("alice", secret), /audience/);
+    assert.throws(() => auth.issueToken("alice", secret, ""), /audience/);
+
+    const token = auth.issueToken("alice", secret, BANK_A);
+    assert.equal(auth.verifyToken(token, secret), null);
+    assert.equal(auth.verifyToken(token, secret, ""), null);
   });
 });
 
@@ -131,6 +212,12 @@ test("tokens", async (t) => {
 for (const file of ["DBServerA.js", "DBServerB.js"]) {
   test(`${file} authentication`, async (t) => {
     const { client, app } = loadServer(file);
+
+    // This bank, and the one across the border. Both servers run this same code
+    // against different databases, in which the same friendly ID is a different
+    // customer.
+    const audience = audienceFor(file);
+    const otherBank = audienceFor(file === "DBServerA.js" ? "DBServerB.js" : "DBServerA.js");
 
     // Note: does NOT reset the fakes -- a caller that queued responses must not
     // have them wiped out from under it. Reset explicitly before queueing.
@@ -155,7 +242,21 @@ for (const file of ["DBServerA.js", "DBServerB.js"]) {
           ["not a bearer scheme", { authorization: "Basic YWxpY2U6cw==" }],
           [
             "token signed with the wrong secret",
-            { authorization: "Bearer " + auth.issueToken("alice", "the-wrong-secret-entirely") },
+            {
+              authorization:
+                "Bearer " + auth.issueToken("alice", "the-wrong-secret-entirely", audience),
+            },
+          ],
+          [
+            // The item this closes: on a shared SESSION_SECRET -- which is what
+            // TEST_SESSION_SECRET is standing in for here, both servers having
+            // been loaded with it -- this token is signed correctly and is not
+            // expired. Only the audience turns it away.
+            "token minted by the OTHER bank",
+            {
+              authorization:
+                "Bearer " + auth.issueToken("alice", TEST_SESSION_SECRET, otherBank),
+            },
           ],
         ]) {
           client.reset();
@@ -171,7 +272,7 @@ for (const file of ["DBServerA.js", "DBServerB.js"]) {
 
     await t.test("an expired token is refused", async () => {
       client.reset();
-      const stale = auth.issueToken("alice", TEST_SESSION_SECRET, 1000);
+      const stale = auth.issueToken("alice", TEST_SESSION_SECRET, audience, 1000);
       const res = await call("post", "/userbal", {
         headers: { authorization: "Bearer " + stale },
         body: {},
@@ -194,7 +295,7 @@ for (const file of ["DBServerA.js", "DBServerB.js"]) {
       const res = makeFakeResponse();
       app._getRoute("post", "/payment")(
         {
-          headers: authHeader("alice"),
+          headers: authHeader("alice", audience),
           // A caller trying to drain someone else's account the old way.
           body: { account: "victim*banka.com", receiver: "mallory*bankb.com", amount: "100" },
         },
@@ -224,7 +325,7 @@ for (const file of ["DBServerA.js", "DBServerB.js"]) {
 
         const res = makeFakeResponse();
         app._getRoute("post", path)(
-          { headers: authHeader("alice"), body: { friendlyid: "victim*banka.com" } },
+          { headers: authHeader("alice", audience), body: { friendlyid: "victim*banka.com" } },
           res
         );
         await waitFor(() => res.endCount > 0 || res.lastJson !== undefined);
@@ -254,7 +355,7 @@ for (const file of ["DBServerA.js", "DBServerB.js"]) {
 
       assert.equal(res.lastJson.msg, "SUCCESS!");
       assert.equal(
-        auth.verifyToken(res.lastJson.token, TEST_SESSION_SECRET).sub,
+        auth.verifyToken(res.lastJson.token, TEST_SESSION_SECRET, audience).sub,
         "alice",
         "the token must be issued for the account that logged in"
       );

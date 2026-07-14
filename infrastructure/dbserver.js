@@ -59,7 +59,20 @@ function createDbServer(config) {
   // Refuses to start if SESSION_SECRET isn't set: a hardcoded fallback signing
   // key would let anyone who has read this repo mint a token for any account.
   const sessionSecret = auth.requireSessionSecret();
-  const requireAuth = auth.requireAuth(sessionSecret);
+
+  // Which bank a token is good at. Taken from the federation domain rather than
+  // being its own config field, because that domain is already the thing that
+  // has to be distinct for the two banks to tell each other's customers apart --
+  // so a third bank cannot be added with an audience that collides with an
+  // existing one without also being unable to receive a payment.
+  //
+  // FLEET_NOTES.md tells the operator to give each bank its own SESSION_SECRET,
+  // which is right, but a document is not an enforcement mechanism: paste the
+  // same secret into both banks and, before this, every token minted by A's
+  // /login sailed through B's requireAuth. Same friendly ID, different customer,
+  // different money.
+  const audience = domain;
+  const requireAuth = auth.requireAuth(sessionSecret, audience);
 
   // Was `Access-Control-Allow-Origin: *`, which let any website in the world call
   // these endpoints from a visitor's browser. Now an allow-list (ALLOWED_ORIGINS).
@@ -170,7 +183,8 @@ function createDbServer(config) {
         console.log("/login: authenticated", ID);
         response.json({
           msg: "SUCCESS!",
-          token: auth.issueToken(ID, sessionSecret),
+          // Good at this bank only, whatever secret the other one was given.
+          token: auth.issueToken(ID, sessionSecret, audience),
           expires_in: auth.TOKEN_TTL_SECONDS,
         });
       }

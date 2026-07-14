@@ -250,19 +250,44 @@ function sign(payloadB64, secret) {
   return base64url(crypto.createHmac("sha256", secret).update(payloadB64).digest());
 }
 
-// Issues a bearer token asserting "this request is account <friendlyid>",
-// signed with the server's secret so a client cannot mint or edit one.
-function issueToken(friendlyid, secret, nowSeconds) {
+// Issues a bearer token asserting "this request is account <friendlyid>, at
+// bank <audience>", signed with the server's secret so a client cannot mint or
+// edit one.
+//
+// The audience is what stops a token being spent at the wrong bank. Bank A and
+// bank B run the same code against different databases, and "alice" at bank A
+// is a different person from "alice" at bank B -- the friendly ID alone doesn't
+// say which one a token means. FLEET_NOTES.md tells whoever deploys these to
+// give each bank its own SESSION_SECRET, which would also keep the two apart,
+// but nothing in the code enforced that or would notice it being ignored: paste
+// the same secret into both and every token minted by one bank's /login silently
+// passed the other bank's requireAuth, spending the same-named account's money
+// at the wrong bank. Now the token names the bank it is for, so a shared secret
+// is a configuration mistake rather than a way through the front door.
+//
+// It is inside the signed payload, so a holder cannot change it.
+function issueToken(friendlyid, secret, audience, nowSeconds) {
+  if (typeof audience !== "string" || audience === "") {
+    // A token with no audience would be valid everywhere, which is the thing
+    // this is here to prevent. Refuse to mint one rather than mint a skeleton
+    // key.
+    throw new Error("issueToken: an audience is required");
+  }
+
   const now = nowSeconds === undefined ? Math.floor(Date.now() / 1000) : nowSeconds;
-  const payload = { sub: friendlyid, exp: now + TOKEN_TTL_SECONDS };
+  const payload = { sub: friendlyid, aud: audience, exp: now + TOKEN_TTL_SECONDS };
   const payloadB64 = base64url(Buffer.from(JSON.stringify(payload), "utf8"));
   return payloadB64 + "." + sign(payloadB64, secret);
 }
 
 // Returns the token's payload, or null if the token is absent, malformed,
-// expired, or not signed by `secret`. Callers must treat null as "not
-// authenticated" -- there is no partial success here.
-function verifyToken(token, secret, nowSeconds) {
+// expired, not signed by `secret`, or was issued for a different `audience`.
+// Callers must treat null as "not authenticated" -- there is no partial success
+// here.
+function verifyToken(token, secret, audience, nowSeconds) {
+  // Fail closed rather than fall back to "any audience will do": a caller that
+  // forgot to say which bank it is must not thereby accept every bank's tokens.
+  if (typeof audience !== "string" || audience === "") return null;
   if (typeof token !== "string") return null;
 
   const parts = token.split(".");
@@ -283,9 +308,20 @@ function verifyToken(token, secret, nowSeconds) {
   } catch (error) {
     return null;
   }
-  if (!payload || typeof payload.sub !== "string" || typeof payload.exp !== "number") {
+  if (
+    !payload ||
+    typeof payload.sub !== "string" ||
+    typeof payload.aud !== "string" ||
+    typeof payload.exp !== "number"
+  ) {
     return null;
   }
+
+  // A token from the other bank is signed correctly (if the secret was shared)
+  // and is not expired. This is the only thing that turns it away. A token
+  // predating the audience field has no `aud` at all and is rejected above --
+  // they last an hour, so the worst that costs is one re-login.
+  if (payload.aud !== audience) return null;
 
   const now = nowSeconds === undefined ? Math.floor(Date.now() / 1000) : nowSeconds;
   if (payload.exp <= now) return null;
@@ -316,13 +352,14 @@ function requireSessionSecret() {
 }
 
 // Express middleware: rejects the request unless it carries a valid bearer
-// token, and otherwise hangs the verified identity off request.auth. Routes
-// must read the account from request.auth.friendlyid, NOT from the body.
-function requireAuth(secret) {
+// token *issued by this bank*, and otherwise hangs the verified identity off
+// request.auth. Routes must read the account from request.auth.friendlyid, NOT
+// from the body.
+function requireAuth(secret, audience) {
   return function (request, response, next) {
     const header = request.headers && (request.headers.authorization || request.headers.Authorization);
     const match = typeof header === "string" && header.match(/^Bearer (.+)$/);
-    const payload = match ? verifyToken(match[1], secret) : null;
+    const payload = match ? verifyToken(match[1], secret, audience) : null;
 
     if (!payload) {
       response.status(401).json({ msg: "ERROR!", error_msg: "Authentication required" });
