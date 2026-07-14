@@ -5,7 +5,7 @@
 ## Must-have
 
 All eight must-haves were addressed in the 2026-07-14 pass (branch
-`hardening-pass-2026-07-12`). Test count went from 6 to 101, all passing
+`hardening-pass-2026-07-12`). Test count went from 6 to 103, all passing
 offline (`npm test` in `infrastructure/`). Two items need a human with database
 access to finish the job — see `FLEET_NOTES.md`.
 
@@ -147,7 +147,7 @@ Not touched in this pass (out of scope — must-haves only), except where noted.
   list (hardcoded local Postgres creds, a dead hardcoded IP, dev TLS certs, the vendored
   binaries, an unused `my-app` CRA scaffold) — this audit's findings are additional to, not a
   repeat of, that list.
-- No live network, blockchain, or database call was made in the 2026-07-14 pass either. All 101
+- No live network, blockchain, or database call was made in the 2026-07-14 pass either. All 103
   tests run offline against hand-written `pg`/`express`/`request` fakes that load the real server
   files, so the route handlers under test are the committed ones, not re-implementations.
 - `react-scripts build` fails in both front ends on Node 26 (`ERR_PACKAGE_PATH_NOT_EXPORTED` from
