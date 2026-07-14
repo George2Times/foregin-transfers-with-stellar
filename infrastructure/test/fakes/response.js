@@ -7,6 +7,7 @@ function makeFakeResponse() {
     calls: [], // e.g. [{ method: "json", args: [...] }, ...]
     endCount: 0,
     lastJson: undefined,
+    headers: {}, // whatever setHeader() was called with, for CORS assertions
 
     status(code) {
       res.statusCode = code;
@@ -23,8 +24,8 @@ function makeFakeResponse() {
       res.calls.push({ method: "end", args: [msg] });
       return res;
     },
-    setHeader() {
-      // no-op, matches the CORS middleware calls in the servers under test
+    setHeader(name, value) {
+      res.headers[name] = value;
       return res;
     },
   };

@@ -20,7 +20,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { loadServer, waitFor, settle } = require("./helpers");
+const { loadServer, waitFor, settle, authHeader } = require("./helpers");
 const requestFake = require("./fakes/request");
 const { makeFakeResponse } = require("./fakes/response");
 
@@ -35,9 +35,15 @@ for (const { file, account, receiver } of SERVERS) {
     const handler = app._getRoute("post", "/payment");
     assert.ok(typeof handler === "function", "/payment route must be registered");
 
+    const senderId = account.split("*")[0];
+
+    // /payment takes the sender from the verified token, so a request needs an
+    // Authorization header rather than an `account` body field.
     function paymentRequest(overrides = {}) {
+      const { headers, ...body } = overrides;
       return {
-        body: Object.assign({ account, receiver, amount: "100" }, overrides),
+        headers: headers === undefined ? authHeader(senderId) : headers,
+        body: Object.assign({ receiver, amount: "100" }, body),
       };
     }
 
@@ -93,7 +99,10 @@ for (const { file, account, receiver } of SERVERS) {
       client.queueResponse({ error: null, results: { rowCount: 0, rows: [] } }); // debit matches nothing
       client.queueResponse({ error: null, results: { rowCount: 0, rows: [] } }); // no such account
 
-      const res = await call(paymentRequest({ account: "nobody*banka.com" }));
+      const res = await call({
+        headers: authHeader("nobody"),
+        body: { receiver, amount: "100" },
+      });
 
       assert.equal(res.statusCode, 404);
       assert.equal(requestFake.calls.length, 0);
@@ -101,7 +110,6 @@ for (const { file, account, receiver } of SERVERS) {
 
     await t.test("missing fields: 400s instead of hanging", async () => {
       for (const [label, overrides] of [
-        ["missing account", { account: undefined }],
         ["missing receiver", { receiver: undefined }],
         ["missing amount", { amount: undefined }],
       ]) {
@@ -192,7 +200,7 @@ for (const { file, account, receiver } of SERVERS) {
         "the balance check and the debit must be a single statement, so two " +
           "concurrent payments can't both pass the check against the same balance"
       );
-      assert.deepEqual(debit.params, [100, account.split("*")[0]]);
+      assert.deepEqual(debit.params, [100, senderId]);
     });
 
     await t.test("reserves the funds BEFORE calling the bridge", async () => {
@@ -231,7 +239,7 @@ for (const { file, account, receiver } of SERVERS) {
         /UPDATE users SET balance = balance \+ \$1 WHERE friendlyid = \$2/,
         "a payment that never left must not stay debited"
       );
-      assert.deepEqual(refund.params, [100, account.split("*")[0]]);
+      assert.deepEqual(refund.params, [100, senderId]);
       assert.equal(res.lastJson.msg, "ERROR!");
     });
 

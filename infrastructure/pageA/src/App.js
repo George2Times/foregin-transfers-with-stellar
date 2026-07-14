@@ -27,10 +27,16 @@ class App extends Component {
 			account: null,
 			balance: 0,
 			name: '',
+			// Bearer token from /login. Every call below carries it; without one
+			// the server answers 401. Kept in component state rather than
+			// localStorage so it doesn't outlive the tab.
+			token: null,
+			loginerror: null,
 
 
 			fields: {
 				friendlyid: null,
+				password: null,
 				receiver: null,
 				amount: null,
 				sellprice: null,
@@ -39,75 +45,120 @@ class App extends Component {
 		}
 	}
 
+	// Every authenticated call sends the token. The server takes the account
+	// from it -- the request body no longer names an account, because naming one
+	// used to be all it took to read or spend someone else's.
+	authHeaders = () => {
+		return {
+			'Accept': 'application/json',
+			'Content-Type': 'application/json',
+			'Authorization': 'Bearer ' + this.state.token,
+		};
+	}
 
-
-	setAccount = () => {
+	login = () => {
 
 		var account = this.state.fields.friendlyid;
-		console.log("account", account);
+		var password = this.state.fields.password;
+		let app = this;
+
+		if (!account || !password) {
+			this.setState({ loginerror: 'Friendly ID and password are required' });
+			return;
+		}
+
+		var url = 'http://' + DBServer + '/login';
+
+		fetch(url, {
+			method: 'POST',
+			headers: {
+				'Accept': 'application/json',
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				friendlyid: account,
+				password: password
+			})
+		}).then(function (response) {
+			return response.json().then(function (data) {
+				return { ok: response.ok, data: data };
+			});
+		}).then(function (result) {
+			if (!result.ok || !result.data.token) {
+				app.setState({ loginerror: 'Login failed', token: null, account: null });
+				return;
+			}
+			app.setState({ token: result.data.token, loginerror: null }, function () {
+				app.setAccount(account);
+			});
+		}).catch(function (error) {
+			console.log(error);
+			app.setState({ loginerror: 'Could not reach the bank server' });
+		});
+	}
+
+	setAccount = (account) => {
+
 		let app = this;
 		var url = 'http://' + DBServer + '/userdet';
 
 		fetch(url, {
 			method: 'POST',
-			headers: {
-				'Accept': 'application/json',
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				friendlyid: account
-			})
-		}).then(function (response, error) {
-			if (response) {
-				return response.json();
+			headers: this.authHeaders(),
+			body: JSON.stringify({})
+		}).then(function (response) {
+			if (!response.ok) {
+				app.setState({ loginerror: 'Could not load account', token: null });
+				return null;
 			}
-			else {
-				console.log(error);
-			}
+			return response.json();
 		}).then(function (data) {
-
+			if (!data) {
+				return;
+			}
 			app.setState({
 				account,
 				name: data.name,
 				balance: data.balance
 			});
-		})
+		}).catch(function (error) {
+			console.log(error);
+			app.setState({ loginerror: 'Could not reach the bank server' });
+		});
 	}
-
-
-
-
 
 	payment = () => {
 
-		console.log(this.state.fields.receiver);
-		console.log(this.state.fields.amount);
-
-		console.log(this.state.account);
 		let app = this;
+		var receiver = this.state.fields.receiver;
+		var amount = Number(this.state.fields.amount);
+
+		// The server rejects these too -- it has to, since it can't trust a
+		// browser -- but there's no reason to make a round trip to be told so.
+		// A negative amount used to be accepted here and *credited* the sender.
+		if (!receiver) {
+			this.setState({ txstatus: 'Enter a receiver' });
+			return;
+		}
+		if (!this.state.fields.amount || !isFinite(amount) || amount <= 0) {
+			this.setState({ txstatus: 'Enter a positive amount' });
+			return;
+		}
+
 		var url = 'http://' + DBServer + '/payment';
 
 		fetch(url, {
 			method: 'POST',
-			headers: {
-				'Accept': 'application/json',
-				'Content-Type': 'application/json',
-			},
+			headers: this.authHeaders(),
 			body: JSON.stringify({
-				receiver: this.state.fields.receiver,
-				amount: this.state.fields.amount,
-				account: this.state.account
+				receiver: receiver,
+				amount: this.state.fields.amount
 			})
-		}).then(function (response, error) {
-			if (response) {
-				return response.json();
-			}
-			else {
-				console.log(error);
-			}
+		}).then(function (response) {
+			return response.json();
 		}).then(function (data) {
 			console.log(data);
-			if (data.msg == "SUCCESS!") {
+			if (data.msg === "SUCCESS!") {
 				console.log("Tx hash", data.result);
 				var disObj = JSON.parse(data.result);
 				app.setState({
@@ -119,10 +170,13 @@ class App extends Component {
 			else {
 				console.log("Error", data);
 				app.setState({
-					txstatus: 'Transaction Failed',
+					txstatus: data.error_msg ? 'Transaction Failed: ' + data.error_msg
+						: 'Transaction Failed',
 				});
 			}
-
+		}).catch(function (error) {
+			console.log(error);
+			app.setState({ txstatus: 'Transaction Failed: could not reach the bank server' });
 		});
 	}
 
@@ -131,53 +185,42 @@ class App extends Component {
 
 		let app = this;
 		var url = 'http://' + DBServer + '/bankuser';
-		fetch(url).then(function (response, error) {
-			if (response) {
-				return response.json();
-			}
-			else {
-				console.log(error);
-			}
+
+		fetch(url, {
+			headers: this.authHeaders()
+		}).then(function (response) {
+			return response.json();
 		}).then(function (data) {
 
 			app.setState({
 				receivedtx: data.tx
-
 			});
 
 			console.log(app.state.receivedtx);
 
-		})
-
+		}).catch(function (error) {
+			console.log(error);
+		});
 	}
 
 	setBalance = () => {
 		let app = this;
-		var account = this.state.account;
-		console.log("Reached here");
 		var url = 'http://' + DBServer + '/userbal';
+
 		fetch(url, {
 			method: 'POST',
-			headers: {
-				'Accept': 'application/json',
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				friendlyid: account
-			})
-		}).then(function (response, error) {
-			if (response) {
-				return response.json();
-			}
-			else {
-				console.log(error);
-			}
+			headers: this.authHeaders(),
+			body: JSON.stringify({})
+		}).then(function (response) {
+			return response.json();
 		}).then(function (data) {
 
 			app.setState({
 				balance: data.balance
 			});
-		})
+		}).catch(function (error) {
+			console.log(error);
+		});
 	}
 
 
@@ -220,7 +263,8 @@ class App extends Component {
 					chkaddr={this.chkaddr}
 					setBalance={this.setBalance}
 					fields={this.state.fields}
-					setAccount={this.setAccount}
+					login={this.login}
+					loginerror={this.state.loginerror}
 					txstatus={this.state.txstatus}
 					txid={this.state.txid} />
 

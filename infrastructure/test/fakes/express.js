@@ -6,6 +6,22 @@
 // Wired up via infrastructure/test/mockRequire.js (Module._resolveFilename
 // hook), not via node_modules, so it is not confused with a real package.
 
+// Runs a route's handler chain the way express does: each handler may either
+// respond (ending the chain) or call next() to pass control on. This is what
+// makes route-level middleware -- app.post("/payment", requireAuth, handler) --
+// behave in tests the way it does in production: if requireAuth answers 401,
+// the real handler never runs.
+function chain(handlers) {
+  return function (request, response) {
+    let index = 0;
+    function next() {
+      const handler = handlers[index++];
+      if (handler) handler(request, response, next);
+    }
+    next();
+  };
+}
+
 function makeApp() {
   const routes = { get: {}, post: {} };
   const middleware = [];
@@ -15,12 +31,12 @@ function makeApp() {
       middleware.push(fn);
       return app;
     },
-    get(path, handler) {
-      routes.get[path] = handler;
+    get(path, ...handlers) {
+      routes.get[path] = chain(handlers);
       return app;
     },
-    post(path, handler) {
-      routes.post[path] = handler;
+    post(path, ...handlers) {
+      routes.post[path] = chain(handlers);
       return app;
     },
     listen(port, cb) {
@@ -36,6 +52,11 @@ function makeApp() {
     // route handler so a test can invoke it directly.
     _getRoute(method, path) {
       return routes[method] && routes[method][path];
+    },
+    // Test helper: the app-level middleware stack, in registration order, so a
+    // test can exercise e.g. the CORS middleware on its own.
+    _getMiddleware() {
+      return middleware.slice();
     },
   };
 

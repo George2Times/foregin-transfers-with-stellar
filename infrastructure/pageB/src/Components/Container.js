@@ -26,15 +26,16 @@ class Container extends Component {
 			this.props.account?
 			<div>
 				<Transfer payment = {this.props.payment}
-				chkaddr = {this.props.chkaddr}			
+				chkaddr = {this.props.chkaddr}
+				setBank = {this.props.setBank}
 				onInputChangeUpdateField={this.props.onInputChangeUpdateField}
 				fields={this.props.fields}
 				txstatus={this.props.txstatus}
 			    txid={this.props.txid}/>
 			</div>:
 			<div>
-			<AppLogin setAccount = {this.props.setAccount}
-					  setBank = {this.props.setBank}	
+			<AppLogin login = {this.props.login}
+					  loginerror = {this.props.loginerror}
 				onInputChangeUpdateField={this.props.onInputChangeUpdateField}
 				fields={this.props.fields}/>
 			</div>

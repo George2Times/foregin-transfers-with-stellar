@@ -8,6 +8,13 @@
 
 const path = require("path");
 
+// The DB servers refuse to start without a signing secret (auth.js's
+// requireSessionSecret() calls process.exit(1)), so the test process has to
+// provide one before any server file is loaded. This is a throwaway value that
+// exists only inside the test run.
+const TEST_SESSION_SECRET = "test-session-secret-not-a-real-one";
+process.env.SESSION_SECRET = TEST_SESSION_SECRET;
+
 const { installMockRequire } = require("./mockRequire");
 installMockRequire();
 
@@ -52,4 +59,11 @@ function settle() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-module.exports = { loadServer, waitFor, settle };
+// Builds the Authorization header a request needs to reach a protected route,
+// signed with the same secret the loaded servers are using.
+function authHeader(friendlyid) {
+  const auth = require("../auth");
+  return { authorization: "Bearer " + auth.issueToken(friendlyid, TEST_SESSION_SECRET) };
+}
+
+module.exports = { loadServer, waitFor, settle, authHeader, TEST_SESSION_SECRET };

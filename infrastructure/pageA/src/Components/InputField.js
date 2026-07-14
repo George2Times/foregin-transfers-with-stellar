@@ -5,6 +5,9 @@ function InputField(props) {
     let value = props.fields[field] ? props.fields[field] : '';
     let placeholder = props.placeholder;
     let addon = props.addon;
+    // Defaults to a text box; the login form passes type="password" so the
+    // password isn't shown on screen as it's typed.
+    let type = props.type || 'text';
 
     let handleChange = e => {
         props.onInputChangeUpdateField(field,e.target.value);
@@ -15,7 +18,7 @@ function InputField(props) {
             <p className="control is-expanded">
                 <input defaultValue={props.default || value}
                        onInput={handleChange}
-                       placeholder={placeholder} className="input" type="text"></input>
+                       placeholder={placeholder} className="input" type={type}></input>
             </p>
             <p className="control">
                 {addon ?

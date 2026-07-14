@@ -4,6 +4,7 @@ const app = express();
 const requestObj = require("request");
 const pg = require("pg");
 const { parseAmount } = require("./money");
+const auth = require("./auth");
 
 // ==== Config ====
 var listened_port = 3602;
@@ -23,48 +24,72 @@ app.use(
   })
 );
 
-app.use(function (req, res, next) {
-  // Website you wish to allow to connect
-  res.setHeader("Access-Control-Allow-Origin", "*");
+// Refuses to start if SESSION_SECRET isn't set: a hardcoded fallback signing
+// key would let anyone who has read this repo mint a token for any account.
+const sessionSecret = auth.requireSessionSecret();
+const requireAuth = auth.requireAuth(sessionSecret);
 
-  // Request methods you wish to allow
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET, POST, OPTIONS, PUT, PATCH, DELETE"
-  );
-
-  // Request headers you wish to allow
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "X-Requested-With,content-type"
-  );
-
-  // Set to true if you need the website to include cookies in the requests sent
-  // to the API (e.g. in case you use sessions)
-  res.setHeader("Access-Control-Allow-Credentials", true);
-
-  // Pass to next layer of middleware
-  next();
-});
+// Was `Access-Control-Allow-Origin: *`, which let any website in the world call
+// these endpoints from a visitor's browser. Now an allow-list (ALLOWED_ORIGINS).
+app.use(auth.corsMiddleware(auth.allowedOriginsFromEnv()));
 
 var server = app.listen(process.env.PORT || listened_port, function () {
   var port = server.address().port;
   console.log("App now running on port", port);
 });
 
-app.post("/userdet", function (request, response) {
+// Exchanges a friendly ID + password for a bearer token. This is the only route
+// that takes an account name from the request body, because it's the only one
+// that makes the caller prove the account is theirs.
+app.post("/login", function (request, response) {
+  console.log("/login: ");
+  var friendlyid = request.body.friendlyid;
+  var password = request.body.password;
+
+  if (!friendlyid || !password) {
+    response.status(400).json({ msg: "ERROR!", error_msg: "Missing friendlyid or password" });
+    return;
+  }
+
+  var ID = String(friendlyid).split("*")[0];
+
+  client.query(
+    "SELECT friendlyid,password_hash FROM users WHERE friendlyid = $1", [ID],
+    (error, results) => {
+      if (error) {
+        console.error(error);
+        response.status(500).json({ msg: "ERROR!", error_msg: "Database error" });
+        return;
+      }
+
+      // Same answer whether the account doesn't exist, has no password set, or
+      // the password is wrong -- otherwise this route tells an attacker which
+      // friendly IDs are real.
+      var storedHash = results.rowCount === 0 ? null : results.rows[0].password_hash;
+      if (!auth.verifyPassword(password, storedHash)) {
+        console.log("/login: rejected", ID);
+        response.status(401).json({ msg: "ERROR!", error_msg: "Invalid credentials" });
+        return;
+      }
+
+      console.log("/login: authenticated", ID);
+      response.json({
+        msg: "SUCCESS!",
+        token: auth.issueToken(ID, sessionSecret),
+        expires_in: auth.TOKEN_TTL_SECONDS,
+      });
+    }
+  );
+});
+
+app.post("/userdet", requireAuth, function (request, response) {
   console.log("/userdet: ");
-  if(!request.body.friendlyid) {
-    // Previously this logged and returned without sending anything, leaving
-    // the caller's request hanging until its own timeout. Every path through
-    // a route handler has to end in a response.
-    console.log("request.body.friendlyid:", request.body.friendlyid);
-    response.status(400).json({ msg: "ERROR!", error_msg: "Missing friendlyid" });
-  } else {
-    var IdParts = request.body.friendlyid.split("*");
-    var ID = IdParts[0];
-    
-    console.log("friendlyid:", request.body.friendlyid);
+  {
+    // The account comes from the verified token, not the request body. Sending
+    // someone else's friendly ID used to be enough to read their name, address,
+    // date of birth and balance.
+    var ID = request.auth.friendlyid;
+
     console.log("ID:", ID);
     // You need to create `accountDatabase.findByFriendlyId()`. It should look
     // up a customer by their Stellar account and return account information.
@@ -97,17 +122,13 @@ app.post("/userdet", function (request, response) {
   }
 });
 
-app.post("/userbal", function (request, response) {
+app.post("/userbal", requireAuth, function (request, response) {
   console.log("/userbal: ");
-  if(!request.body.friendlyid) {
-    // Same silent hang as /userdet: respond instead of falling off the end.
-    console.log("request.body.friendlyid:", request.body.friendlyid);
-    response.status(400).json({ msg: "ERROR!", error_msg: "Missing friendlyid" });
-  } else {
-    var IdParts = request.body.friendlyid.split("*");
-    var ID = IdParts[0];
-    
-    console.log("friendlyid:", request.body.friendlyid);
+  {
+    // Token, not body -- reading another customer's balance used to be a matter
+    // of typing their friendly ID.
+    var ID = request.auth.friendlyid;
+
     console.log("ID:", ID);
 
     client.query(
@@ -138,16 +159,11 @@ app.post("/userbal", function (request, response) {
   }
 });
 
-app.post("/payment", function (request, response) {
+app.post("/payment", requireAuth, function (request, response) {
   console.log("/payment: ");
 
   // Every one of these used to fall off the end of the handler with no
   // response at all, hanging the caller until its own timeout.
-  if (!request.body.account) {
-    console.log("request.body.account:", request.body.account);
-    response.status(400).json({ msg: "ERROR!", error_msg: "Missing account" });
-    return;
-  }
   if (!request.body.receiver) {
     console.log("request.body.receiver:", request.body.receiver);
     response.status(400).json({ msg: "ERROR!", error_msg: "Missing receiver" });
@@ -170,8 +186,10 @@ app.post("/payment", function (request, response) {
     return;
   }
 
-  var IdParts = request.body.account.split("*");
-  var ID = IdParts[0];
+  // The sender is whoever the token says it is. It used to be whatever account
+  // the request body named -- so any caller could spend any account's money
+  // just by putting someone else's friendly ID in the `account` field.
+  var ID = request.auth.friendlyid;
   var friendlyid = ID + domain;
   console.log("friendlyid:", friendlyid);
   console.log("ID:", ID);
@@ -291,7 +309,7 @@ app.post("/payment", function (request, response) {
   );
 });
 
-app.get("/bankuser", function (request, response) {
+app.get("/bankuser", requireAuth, function (request, response) {
   console.log("/bankuser:");
   client.query("SELECT * from transactions", (error, results) => {
     if (error) {

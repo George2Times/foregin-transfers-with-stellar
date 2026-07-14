@@ -19,7 +19,15 @@ function Transfer(props) {
                             Transfer
                         </a>
                     </p>
-			
+
+			{/* The bank-user view reads every transaction, so it needs a token.
+			    It used to sit on the login screen, where there isn't one yet. */}
+			<p className="control ">
+				<a className="button is-info" onClick={() => props.setBank()}>
+                            Bank User
+                        </a>
+                    </p>
+
 			<div className="column" >
 				<div className="column" >
 						<p>
