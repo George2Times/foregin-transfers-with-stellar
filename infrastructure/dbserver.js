@@ -26,8 +26,26 @@ function createDbServer(config) {
   const app = express();
   const domain = config.domain;
 
-  const client = new pg.Client(config.conString);
-  client.connect();
+  // A pool, not a single Client.
+  //
+  // The old `new pg.Client(conString)` + `client.connect()` opened exactly one
+  // connection at startup and never opened another. Nothing reconnected: if that
+  // connection dropped -- the database restarting is the ordinary way this
+  // happens, and it needn't even be a crash -- every subsequent query on this
+  // server failed forever, and the only cure was a manual restart of the
+  // process. A pool discards a broken connection and establishes a new one on
+  // the next query, so the server rides out a database bounce instead of being
+  // permanently bricked by it.
+  //
+  // CallbacksA/B already moved to a pool because /receive's transaction needed a
+  // connection to itself. This is the same change for the other reason.
+  const pool = new pg.Pool({ connectionString: config.conString });
+  pool.on("error", function (error) {
+    // An idle client erroring out (again: a DB restart) must not take the
+    // process down with an unhandled 'error' event. The pool has already
+    // discarded it; the next query gets a fresh connection.
+    console.error("postgres pool error:", error);
+  });
 
   app.use(bodyParser.json());
   app.use(
@@ -69,7 +87,7 @@ function createDbServer(config) {
 
     var ID = String(friendlyid).split("*")[0];
 
-    client.query(
+    pool.query(
       "SELECT friendlyid,password_hash FROM users WHERE friendlyid = $1", [ID],
       (error, results) => {
         if (error) {
@@ -110,7 +128,7 @@ function createDbServer(config) {
       // You need to create `accountDatabase.findByFriendlyId()`. It should look
       // up a customer by their Stellar account and return account information.
 
-      client.query(
+      pool.query(
         "SELECT name,address,dob,balance FROM users WHERE friendlyid = $1", [ID],
         (error, results) => {
           if (error) {
@@ -147,7 +165,7 @@ function createDbServer(config) {
 
       console.log("ID:", ID);
 
-      client.query(
+      pool.query(
         "SELECT balance FROM users WHERE friendlyid = $1", [ID],
         (error, results) => {
           if (error) {
@@ -164,7 +182,6 @@ function createDbServer(config) {
               };
               console.log("query answer:", answer);
               response.json(answer);
-              //client.end();
               response.end();
             } else {
               response.status(404).json({ msg: "ERROR!", error_msg: "User not found" });
@@ -228,7 +245,7 @@ function createDbServer(config) {
     // the WHERE clause against the already-debited row. rowCount 0 means the
     // debit did not apply -- no such account, or not enough money. Nothing is
     // sent to the bridge until the money is provably set aside.
-    client.query(
+    pool.query(
       "UPDATE users SET balance = balance - $1 WHERE friendlyid = $2 AND balance >= $1", [amount, ID],
       (error, results) => {
         if (error) {
@@ -240,7 +257,7 @@ function createDbServer(config) {
         if (results.rowCount === 0) {
           // The debit didn't apply. Work out which of the two reasons it was, so
           // the caller still gets the 404 / "Insufficient balance!" it expects.
-          client.query(
+          pool.query(
             "SELECT balance from users where friendlyid = $1", [ID],
             (lookupError, lookupResults) => {
               if (lookupError) {
@@ -288,7 +305,7 @@ function createDbServer(config) {
             if (err || res.statusCode !== 200) {
               // The money never left. Put the reservation back.
               console.error("ERROR!", err || body);
-              client.query(
+              pool.query(
                 "UPDATE users SET balance = balance + $1 WHERE friendlyid = $2", [amount, ID],
                 (refundError) => {
                   if (refundError) {
@@ -327,7 +344,7 @@ function createDbServer(config) {
 
   app.get("/bankuser", requireAuth, function (request, response) {
     console.log("/bankuser:");
-    client.query("SELECT * from transactions", (error, results) => {
+    pool.query("SELECT * from transactions", (error, results) => {
       if (error) {
         console.error(error);
         response.status(500).json({ msg: "ERROR!", error_msg: "Database error" });
@@ -352,7 +369,7 @@ function createDbServer(config) {
     });
   });
 
-  return { app, server, client };
+  return { app, server, pool };
 }
 
 module.exports = { createDbServer, USD, ISSUER };
