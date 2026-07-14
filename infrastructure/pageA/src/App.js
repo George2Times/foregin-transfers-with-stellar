@@ -84,7 +84,13 @@ class App extends Component {
 			});
 		}).then(function (result) {
 			if (!result.ok || !result.data.token) {
-				app.setState({ loginerror: 'Login failed', token: null, account: null });
+				// Say what the server said, when it said anything. A locked-out
+				// caller has been refused for a reason they can act on ("try again
+				// later"), and telling them "Login failed" instead means telling
+				// someone whose password is CORRECT that it is wrong -- so they
+				// retry, and every retry extends the lockout.
+				var reason = result.data && result.data.error_msg;
+				app.setState({ loginerror: reason || 'Login failed', token: null, account: null });
 				return;
 			}
 			app.setState({ token: result.data.token, loginerror: null }, function () {

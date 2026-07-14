@@ -234,11 +234,30 @@ describe("login()", () => {
 
     await drive(() => app.login());
 
-    expect(app.state.loginerror).toBe("Login failed");
+    expect(app.state.loginerror).toBe("Invalid credentials");
     expect(app.state.token).toBe(null);
     expect(app.state.account).toBe(null);
     // A refused login must not go on to request an account.
     expect(calledUrls()).toHaveLength(1);
+  });
+
+  test("tells a locked-out user to wait rather than that their password is wrong", async () => {
+    // /login locks an account out after a run of failures. The user who hits
+    // that has typed the RIGHT password by then as often as not, and a flat
+    // "Login failed" tells them to try again -- which is what keeps the lockout
+    // alive. Show them what the server actually said.
+    typeInto({ friendlyid: "alice", password: "hunter2" });
+    global.fetch.mockReturnValueOnce(
+      jsonResponse(
+        { msg: "ERROR!", error_msg: "Too many failed login attempts. Try again later." },
+        { ok: false, status: 429 }
+      )
+    );
+
+    await drive(() => app.login());
+
+    expect(app.state.loginerror).toBe("Too many failed login attempts. Try again later.");
+    expect(app.state.token).toBe(null);
   });
 
   test("tells the user when the bank server can't be reached", async () => {
