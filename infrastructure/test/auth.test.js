@@ -14,7 +14,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { loadServer, waitFor, settle, authHeader, TEST_SESSION_SECRET } = require("./helpers");
-const requestFake = require("./fakes/request");
+const fetchFake = require("./fakes/node-fetch");
 const { makeFakeResponse } = require("./fakes/response");
 const auth = require("../auth");
 
@@ -127,12 +127,12 @@ for (const file of ["DBServerA.js", "DBServerB.js"]) {
           ],
         ]) {
           client.reset();
-          requestFake.reset();
+          fetchFake.reset();
           const res = await call(method, path, { headers, body });
 
           assert.equal(res.statusCode, 401, `${path} with ${label} must be 401`);
           assert.equal(client.queries.length, 0, `${path} with ${label} must not query the DB`);
-          assert.equal(requestFake.calls.length, 0, `${path} with ${label} must not pay anyone`);
+          assert.equal(fetchFake.calls.length, 0, `${path} with ${label} must not pay anyone`);
         }
       }
     });
@@ -151,12 +151,12 @@ for (const file of ["DBServerA.js", "DBServerB.js"]) {
     // The core of the whole item: the body cannot name the account.
     await t.test("/payment spends the TOKEN's account, not the body's", async () => {
       client.reset();
-      requestFake.reset();
+      fetchFake.reset();
       client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // debit
-      requestFake.queueResponse({
-        err: null,
-        res: { statusCode: 200 },
-        body: JSON.stringify({ hash: "abc" }),
+      fetchFake.queueResponse({
+        ok: true,
+        status: 200,
+        text: JSON.stringify({ hash: "abc" }),
       });
 
       const res = makeFakeResponse();

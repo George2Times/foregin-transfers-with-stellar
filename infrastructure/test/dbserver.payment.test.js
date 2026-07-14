@@ -2,7 +2,7 @@
 //
 // These exercise the real route handlers from the committed source files (not a
 // re-implementation), using hand-written in-memory fakes for `pg`, `express`,
-// `body-parser` and `request` (see ./fakes and ./mockRequire.js). No real
+// `body-parser` and `node-fetch` (see ./fakes and ./mockRequire.js). No real
 // Postgres, HTTP server, or network call is involved.
 //
 // The same suite runs against both files. They are near-identical copies of each
@@ -21,7 +21,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { loadServer, waitFor, settle, authHeader } = require("./helpers");
-const requestFake = require("./fakes/request");
+const fetchFake = require("./fakes/node-fetch");
 const { makeFakeResponse } = require("./fakes/response");
 
 const SERVERS = [
@@ -51,7 +51,7 @@ for (const { file, account, receiver } of SERVERS) {
     // results. Call before queueing a case's responses, not after.
     function fresh() {
       client.reset();
-      requestFake.reset();
+      fetchFake.reset();
     }
 
     // Drives the handler and waits for it to answer. Fails loudly (rather than
@@ -80,7 +80,7 @@ for (const { file, account, receiver } of SERVERS) {
 
       const res = await call(paymentRequest({ amount: "500" }));
 
-      assert.equal(requestFake.calls.length, 0, "must not call the bridge when funds are short");
+      assert.equal(fetchFake.calls.length, 0, "must not call the bridge when funds are short");
       assert.equal(res.lastJson.error_msg, "Insufficient balance!");
     });
 
@@ -90,7 +90,7 @@ for (const { file, account, receiver } of SERVERS) {
 
       const res = await call(paymentRequest());
 
-      assert.equal(requestFake.calls.length, 0, "must not call the bridge on a DB error");
+      assert.equal(fetchFake.calls.length, 0, "must not call the bridge on a DB error");
       assert.equal(res.lastJson.msg, "ERROR!");
     });
 
@@ -105,7 +105,7 @@ for (const { file, account, receiver } of SERVERS) {
       });
 
       assert.equal(res.statusCode, 404);
-      assert.equal(requestFake.calls.length, 0);
+      assert.equal(fetchFake.calls.length, 0);
     });
 
     await t.test("missing fields: 400s instead of hanging", async () => {
@@ -118,7 +118,7 @@ for (const { file, account, receiver } of SERVERS) {
 
         assert.equal(res.statusCode, 400, `${label} must be a 400`);
         assert.equal(client.queries.length, 0, `${label} must not reach the database`);
-        assert.equal(requestFake.calls.length, 0, `${label} must not reach the bridge`);
+        assert.equal(fetchFake.calls.length, 0, `${label} must not reach the bridge`);
       }
     });
 
@@ -132,7 +132,7 @@ for (const { file, account, receiver } of SERVERS) {
 
         assert.equal(res.statusCode, 400, `amount ${amount} must be rejected`);
         assert.equal(client.queries.length, 0, "must not touch the balance");
-        assert.equal(requestFake.calls.length, 0, "must not call the bridge");
+        assert.equal(fetchFake.calls.length, 0, "must not call the bridge");
       }
     });
 
@@ -143,40 +143,40 @@ for (const { file, account, receiver } of SERVERS) {
 
         assert.equal(res.statusCode, 400, `amount ${JSON.stringify(amount)} must be rejected`);
         assert.equal(client.queries.length, 0, "must not touch the balance");
-        assert.equal(requestFake.calls.length, 0, "must not call the bridge");
+        assert.equal(fetchFake.calls.length, 0, "must not call the bridge");
       }
     });
 
     await t.test("sufficient balance: calls the bridge and reports success", async () => {
       fresh();
       client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // funds reserved
-      requestFake.queueResponse({
-        err: null,
-        res: { statusCode: 200 },
-        body: JSON.stringify({ hash: "abc123" }),
+      fetchFake.queueResponse({
+        ok: true,
+        status: 200,
+        text: JSON.stringify({ hash: "abc123" }),
       });
 
       const res = await call(paymentRequest({ amount: "100" }));
 
-      assert.equal(requestFake.calls.length, 1, "bridge must be called exactly once");
-      assert.equal(Number(requestFake.calls[0].form.amount), 100);
-      assert.equal(requestFake.calls[0].form.destination, receiver);
+      assert.equal(fetchFake.calls.length, 1, "bridge must be called exactly once");
+      assert.equal(Number(fetchFake.formOf(0).amount), 100);
+      assert.equal(fetchFake.formOf(0).destination, receiver);
       assert.equal(res.lastJson.msg, "SUCCESS!");
     });
 
     await t.test("a fractional amount reaches the bridge intact", async () => {
       fresh();
       client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // funds reserved
-      requestFake.queueResponse({
-        err: null,
-        res: { statusCode: 200 },
-        body: JSON.stringify({ hash: "abc123" }),
+      fetchFake.queueResponse({
+        ok: true,
+        status: 200,
+        text: JSON.stringify({ hash: "abc123" }),
       });
 
       await call(paymentRequest({ amount: "12.75" }));
 
       assert.equal(
-        Number(requestFake.calls[0].form.amount),
+        Number(fetchFake.formOf(0).amount),
         12.75,
         "the cents must survive the sending side too"
       );
@@ -185,10 +185,10 @@ for (const { file, account, receiver } of SERVERS) {
     await t.test("debits with one conditional statement, not a read-then-write", async () => {
       fresh();
       client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } });
-      requestFake.queueResponse({
-        err: null,
-        res: { statusCode: 200 },
-        body: JSON.stringify({ hash: "abc123" }),
+      fetchFake.queueResponse({
+        ok: true,
+        status: 200,
+        text: JSON.stringify({ hash: "abc123" }),
       });
 
       await call(paymentRequest({ amount: "100" }));
@@ -206,10 +206,10 @@ for (const { file, account, receiver } of SERVERS) {
     await t.test("reserves the funds BEFORE calling the bridge", async () => {
       fresh();
       client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } });
-      requestFake.queueResponse({
-        err: null,
-        res: { statusCode: 200 },
-        body: JSON.stringify({ hash: "abc123" }),
+      fetchFake.queueResponse({
+        ok: true,
+        status: 200,
+        text: JSON.stringify({ hash: "abc123" }),
       });
 
       await call(paymentRequest({ amount: "100" }));
@@ -218,17 +218,13 @@ for (const { file, account, receiver } of SERVERS) {
       // aside; otherwise the gap between "checked" and "debited" is a window
       // for a second payment to spend the same balance.
       assert.match(client.queries[0].sql, /UPDATE users SET balance = balance -/);
-      assert.equal(requestFake.calls.length, 1);
+      assert.equal(fetchFake.calls.length, 1);
     });
 
     await t.test("refunds the reservation when the bridge fails", async () => {
       fresh();
       client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // debit applied
-      requestFake.queueResponse({
-        err: new Error("bridge unreachable"),
-        res: undefined,
-        body: undefined,
-      });
+      fetchFake.queueRejection(new Error("bridge unreachable"));
       client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // refund
 
       const res = await call(paymentRequest({ amount: "100" }));
@@ -246,11 +242,7 @@ for (const { file, account, receiver } of SERVERS) {
     await t.test("refunds the reservation when the bridge rejects the payment", async () => {
       fresh();
       client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // debit applied
-      requestFake.queueResponse({
-        err: null,
-        res: { statusCode: 500 },
-        body: "bridge said no",
-      });
+      fetchFake.queueResponse({ ok: false, status: 500, text: "bridge said no" });
       client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // refund
 
       const res = await call(paymentRequest({ amount: "100" }));
@@ -266,11 +258,7 @@ for (const { file, account, receiver } of SERVERS) {
     await t.test("still responds if the refund itself fails", async () => {
       fresh();
       client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // debit applied
-      requestFake.queueResponse({
-        err: new Error("bridge unreachable"),
-        res: undefined,
-        body: undefined,
-      });
+      fetchFake.queueRejection(new Error("bridge unreachable"));
       client.queueResponse({ error: new Error("db gone"), results: null }); // refund fails
 
       const res = await call(paymentRequest({ amount: "100" }));

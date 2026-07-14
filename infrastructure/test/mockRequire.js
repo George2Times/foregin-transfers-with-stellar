@@ -1,5 +1,5 @@
 // Redirects `require("express")`, `require("body-parser")`, `require("pg")`
-// and `require("request")` to the hand-written fakes in ./fakes, so
+// and `require("node-fetch")` to the hand-written fakes in ./fakes, so
 // DBServerA.js / DBServerB.js / CallbacksA.js / CallbacksB.js can be loaded
 // and their route handlers exercised in a test process with:
 //   - no real npm packages installed (infrastructure/ has no node_modules),
@@ -18,7 +18,6 @@ const MOCKS = {
   express: path.join(__dirname, "fakes", "express.js"),
   "body-parser": path.join(__dirname, "fakes", "body-parser.js"),
   pg: path.join(__dirname, "fakes", "pg.js"),
-  request: path.join(__dirname, "fakes", "request.js"),
   "node-fetch": path.join(__dirname, "fakes", "node-fetch.js"),
 };
 

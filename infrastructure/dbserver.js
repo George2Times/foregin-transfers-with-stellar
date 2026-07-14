@@ -11,7 +11,7 @@
 
 const express = require("express");
 const bodyParser = require("body-parser");
-const requestObj = require("request");
+const fetch = require("node-fetch");
 const pg = require("pg");
 const { parseAmount } = require("./money");
 const auth = require("./auth");
@@ -297,47 +297,57 @@ function createDbServer(config) {
           use_compliance: true,
         };
         console.log("paymentRequestForm:", paymentRequestForm);
-        requestObj.post({
-            url: config.entryPointBS,
-            form: paymentRequestForm,
-          },
-          function (err, res, body) {
-            if (err || res.statusCode !== 200) {
-              // The money never left. Put the reservation back.
-              console.error("ERROR!", err || body);
-              pool.query(
-                "UPDATE users SET balance = balance + $1 WHERE friendlyid = $2", [amount, ID],
-                (refundError) => {
-                  if (refundError) {
-                    // The debit stuck, the send failed, and the refund failed too:
-                    // the balance is now short by `amount` with nothing to show
-                    // for it. Nothing here can fix that, so say so loudly rather
-                    // than let it look like an ordinary failed request.
-                    console.error(
-                      "CRITICAL: failed to refund reserved funds after a failed payment.",
-                      "account:", ID, "amount:", amount, "txid:", paymentId,
-                      refundError
-                    );
-                  }
-                  response.json({
-                    result: body,
-                    msg: "ERROR!",
-                    error_msg: err,
-                  });
-                  response.end();
-                }
-              );
+
+        // The money never left. Put the reservation back, then answer the caller.
+        function refundAndFail(reason, body) {
+          console.error("ERROR!", reason);
+          pool.query(
+            "UPDATE users SET balance = balance + $1 WHERE friendlyid = $2", [amount, ID],
+            (refundError) => {
+              if (refundError) {
+                // The debit stuck, the send failed, and the refund failed too:
+                // the balance is now short by `amount` with nothing to show
+                // for it. Nothing here can fix that, so say so loudly rather
+                // than let it look like an ordinary failed request.
+                console.error(
+                  "CRITICAL: failed to refund reserved funds after a failed payment.",
+                  "account:", ID, "amount:", amount, "txid:", paymentId,
+                  refundError
+                );
+              }
+              response.json({
+                result: body,
+                msg: "ERROR!",
+                error_msg: reason,
+              });
+              response.end();
+            }
+          );
+        }
+
+        postForm(config.entryPointBS, paymentRequestForm)
+          .then(function (bridge) {
+            if (bridge.status !== 200) {
+              // The bridge answered, and it said no. The payment did not happen.
+              refundAndFail("bridge responded " + bridge.status, bridge.body);
               return;
             }
 
-            console.log("SUCCESS!", body);
+            console.log("SUCCESS!", bridge.body);
             response.json({
-              result: body,
+              result: bridge.body,
               msg: "SUCCESS!",
             });
             response.end();
-          }
-        );
+          })
+          .catch(function (error) {
+            // The call never completed at all -- the bridge host is down, DNS
+            // failed. For the sender's balance this is the same as an outright
+            // rejection: money must not stay debited for a payment that never
+            // left. (`request` reported this as an `err` argument; a rejected
+            // promise is the same event by another name.)
+            refundAndFail(error && error.message ? error.message : String(error), undefined);
+          });
       }
     );
   });
@@ -370,6 +380,44 @@ function createDbServer(config) {
   });
 
   return { app, server, pool };
+}
+
+// POSTs `form` to `url` as application/x-www-form-urlencoded -- the shape the
+// bridge server expects, and the one `request.post({form})` used to produce.
+//
+// This is the whole reason the deprecated `request` package was still a
+// dependency. It has been unmaintained since 2020 and pins a `tough-cookie`
+// with a prototype-pollution CVE (CVE-2023-26136), which the bridge call has no
+// use for -- it never touches a cookie. `node-fetch` was already a dependency
+// (CallbacksA/B use it), so this removes a package and its vulnerable
+// dependency tree rather than trading one for another.
+//
+// Resolves for any completed call, carrying the status; rejects only when the
+// call never completed (host down, DNS failure). The caller must tell those two
+// apart: both refund, but only one of them is the bridge saying no.
+//
+// The status is handed back raw rather than as fetch's `ok` (which is any 2xx),
+// because the caller's rule is `!== 200` exactly, as it was under `request`.
+// Widening that to 2xx would change which bridge replies trigger a refund, and
+// a refund for a payment the bridge actually accepted is money created.
+function postForm(url, form) {
+  var body = new URLSearchParams();
+  Object.keys(form).forEach(function (key) {
+    body.append(key, String(form[key]));
+  });
+
+  return fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  }).then(function (bridgeResponse) {
+    return bridgeResponse.text().then(function (text) {
+      return {
+        status: bridgeResponse.status,
+        body: text,
+      };
+    });
+  });
 }
 
 module.exports = { createDbServer, USD, ISSUER };
