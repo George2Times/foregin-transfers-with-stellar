@@ -38,6 +38,34 @@ function loadServer(fileName) {
   };
 }
 
+// Builds a DB server straight from the shared factory with a caller-supplied
+// config, for the handful of assertions that need a setting neither bank ships.
+// Everything else should go through loadServer() and drive the real DBServerA/B
+// files -- this is the same handler code either way, just configured differently.
+function loadDbServerWith(overrides) {
+  const { createDbServer } = require("../dbserver");
+  const dbCountBefore = dbInstances.length;
+  const appCountBefore = express.instances.length;
+
+  createDbServer(
+    Object.assign(
+      {
+        listened_port: 3999,
+        domain: "*banka.com",
+        conString: "postgres://test@localhost:5432/test",
+        entryPointBS: "http://localhost:8006/payment",
+        firstTxid: 1,
+      },
+      overrides
+    )
+  );
+
+  return {
+    client: dbInstances[dbCountBefore],
+    app: express.instances[appCountBefore],
+  };
+}
+
 // Resolves once `predicate()` is true, so a test can wait for a route handler's
 // async DB callbacks to finish without guessing at a fixed sleep.
 function waitFor(predicate, { timeout = 1000, interval = 5 } = {}) {
@@ -66,4 +94,11 @@ function authHeader(friendlyid) {
   return { authorization: "Bearer " + auth.issueToken(friendlyid, TEST_SESSION_SECRET) };
 }
 
-module.exports = { loadServer, waitFor, settle, authHeader, TEST_SESSION_SECRET };
+module.exports = {
+  loadServer,
+  loadDbServerWith,
+  waitFor,
+  settle,
+  authHeader,
+  TEST_SESSION_SECRET,
+};

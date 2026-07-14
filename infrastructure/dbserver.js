@@ -22,6 +22,8 @@ const USD = "USD";
 const ISSUER = "GAIHBCB57M2SDFQYUMANDBHW4YYMD3FJVK2OGHRKKCNF2HBZIRBKRX6E";
 
 // config: { listened_port, domain, conString, entryPointBS, firstTxid }
+// plus two optional /login lockout limits, defaulted below:
+//   { loginFailuresPerAccount, loginFailuresPerSource }
 function createDbServer(config) {
   const app = express();
   const domain = config.domain;
@@ -72,6 +74,33 @@ function createDbServer(config) {
   // don't collide.
   var txid = config.firstTxid;
 
+  // Nothing used to slow /login down. The 401s are deliberately identical
+  // whatever the reason, and the password hashing is deliberately slow, but
+  // neither of those matters if an attacker may simply keep trying: a password
+  // list against one known friendly ID, or one common password against every
+  // friendly ID in turn, both ran as fast as the server would answer.
+  //
+  // Two scopes, so that neither attack shape is free:
+  //   - by account: 5 failures locks that friendly ID. Stops a password list.
+  //   - by source:  50 failures locks that address. Stops the same attacker
+  //     sidestepping the first budget by spraying one password across many
+  //     accounts, and is loose enough that a shared office address running
+  //     ordinary logins will never reach it.
+  //
+  // They are separate tables on purpose. An attacker who sprays thousands of
+  // made-up friendly IDs to churn the per-account table out of memory still
+  // accumulates failures against their own source entry, which lives in a table
+  // they cannot flood (it holds one entry per address).
+  //
+  // Both budgets are per-process and both limits can be overridden per bank
+  // (`loginFailuresPerAccount` / `loginFailuresPerSource`); neither bank does.
+  const loginByAccount = auth.createLoginThrottle({
+    maxFailures: config.loginFailuresPerAccount,
+  });
+  const loginBySource = auth.createLoginThrottle({
+    maxFailures: config.loginFailuresPerSource || 50,
+  });
+
   // Exchanges a friendly ID + password for a bearer token. This is the only route
   // that takes an account name from the request body, because it's the only one
   // that makes the caller prove the account is theirs.
@@ -81,30 +110,62 @@ function createDbServer(config) {
     var password = request.body.password;
 
     if (!friendlyid || !password) {
+      // Not an attempt at a password, so it isn't counted as a failed one --
+      // otherwise a caller could lock an account out by sending it nothing.
       response.status(400).json({ msg: "ERROR!", error_msg: "Missing friendlyid or password" });
       return;
     }
 
     var ID = String(friendlyid).split("*")[0];
+    var source = auth.requestSource(request);
+
+    // Checked before the lookup and before the password hashing, so a locked-out
+    // caller costs this server neither a database round-trip nor the ~100ms of
+    // scrypt that verifying a password deliberately burns. Unlimited /login
+    // attempts were a way to spend a server's CPU as well as to guess at it.
+    var wait = Math.max(loginByAccount.retryAfter(ID), loginBySource.retryAfter(source));
+    if (wait > 0) {
+      console.log("/login: locked out", ID, "for", wait, "more seconds");
+      response.setHeader("Retry-After", String(wait));
+      response.status(429).json({
+        msg: "ERROR!",
+        error_msg: "Too many failed login attempts. Try again later.",
+      });
+      return;
+    }
 
     pool.query(
       "SELECT friendlyid,password_hash FROM users WHERE friendlyid = $1", [ID],
       (error, results) => {
         if (error) {
           console.error(error);
+          // A database failure is ours, not the caller's. Counting it as a failed
+          // attempt would let a wobbly database lock out every customer it has.
           response.status(500).json({ msg: "ERROR!", error_msg: "Database error" });
           return;
         }
 
         // Same answer whether the account doesn't exist, has no password set, or
         // the password is wrong -- otherwise this route tells an attacker which
-        // friendly IDs are real.
+        // friendly IDs are real. (verifyPassword also takes the same *time* in
+        // all three cases, or the answer would leak anyway.)
         var storedHash = results.rowCount === 0 ? null : results.rows[0].password_hash;
         if (!auth.verifyPassword(password, storedHash)) {
+          // Counted against the ID as typed, existing or not: if only real
+          // accounts locked out, the lockout would answer the question the equal
+          // 401s refuse to.
+          loginByAccount.recordFailure(ID);
+          loginBySource.recordFailure(source);
           console.log("/login: rejected", ID);
           response.status(401).json({ msg: "ERROR!", error_msg: "Invalid credentials" });
           return;
         }
+
+        // Knowing the password clears the account's failures, so a typo followed
+        // by a correct login leaves no trace. The source's failures stand: an
+        // attacker holding one valid account of their own must not be able to
+        // reset their spraying budget by logging into it.
+        loginByAccount.recordSuccess(ID);
 
         console.log("/login: authenticated", ID);
         response.json({

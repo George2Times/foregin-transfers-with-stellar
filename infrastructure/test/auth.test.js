@@ -46,6 +46,38 @@ test("password hashing", async (t) => {
       assert.equal(auth.verifyPassword("anything", stored), false, `stored: ${stored}`);
     }
   });
+
+  await t.test("takes as long to reject an account with no hash as one with", () => {
+    // /login answers 401 in the same words whether the friendly ID exists or
+    // not, precisely so that it can't be used to enumerate accounts. That was
+    // undone by the clock: verifyPassword() used to return false *immediately*
+    // when there was no stored hash to check against, and spend ~100ms of scrypt
+    // when there was. The reply was identical; how long it took to arrive was
+    // not, and that is just as good an answer to "does alice bank here?".
+    const stored = auth.hashPassword("hunter2");
+
+    function timeOf(work) {
+      const start = process.hrtime.bigint();
+      work();
+      return Number(process.hrtime.bigint() - start);
+    }
+
+    // Warm up, so neither figure includes first-call overhead.
+    auth.verifyPassword("wrong", stored);
+
+    const real = timeOf(() => auth.verifyPassword("wrong", stored));
+    const absent = timeOf(() => auth.verifyPassword("wrong", null));
+
+    // A generous margin: the point is that rejecting an unknown account costs
+    // real work, not that the two are identical to the nanosecond. Before the
+    // fix `absent` was a few microseconds against `real`'s ~100ms, so any
+    // fraction at all separates the two.
+    assert.ok(
+      absent > real / 2,
+      `rejecting an unknown account took ${absent / 1e6}ms against ${real / 1e6}ms for a ` +
+        `known one -- the difference is an enumeration oracle`
+    );
+  });
 });
 
 test("tokens", async (t) => {
