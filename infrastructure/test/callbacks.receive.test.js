@@ -215,6 +215,22 @@ for (const file of ["CallbacksA.js", "CallbacksB.js"]) {
       assert.equal(client.released, client.borrowed, "the connection must be released");
     });
 
+    await t.test("answers 500 if it can't even get a connection", async () => {
+      // Express 4 doesn't catch a rejected promise from an async handler, so a
+      // pool.connect() that throws would otherwise be an unhandled rejection
+      // and a request that never gets an answer at all.
+      client.reset();
+      client.failNextConnect(new Error("database unreachable"));
+
+      const res = makeFakeResponse();
+      handler(receiveRequest(), res);
+      await waitFor(() => res.endCount > 0);
+      await settle();
+
+      assert.equal(res.statusCode, 500);
+      assert.equal(client.released, client.borrowed, "must not release what it never borrowed");
+    });
+
     await t.test("rejects bad input before opening a transaction", async () => {
       for (const [label, overrides] of [
         ["negative amount", { amount: "-100" }],

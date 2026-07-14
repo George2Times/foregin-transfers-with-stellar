@@ -210,7 +210,20 @@ app.post("/receive", async function (request, response) {
   //    or /payment on the same account can't be lost.
   //  - Everything commits together, or nothing does: we can no longer record a
   //    transaction we didn't credit, or credit one we didn't record.
-  var db = await pool.connect();
+  // Getting the connection is deliberately outside the try/finally below --
+  // that block releases the connection, and there is nothing to release if we
+  // never got one. Express 4 does not catch a rejected promise from an async
+  // handler, so letting this throw would mean an unhandled rejection and a
+  // request that never gets an answer.
+  var db;
+  try {
+    db = await pool.connect();
+  } catch (error) {
+    console.error("/receive: no database connection available:", error);
+    response.status(500).end("Database unavailable");
+    return;
+  }
+
   try {
     await db.query("BEGIN");
 

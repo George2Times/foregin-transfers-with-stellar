@@ -34,6 +34,7 @@ class FakeQueryable {
   reset() {
     this.queries.length = 0;
     this._queue.length = 0;
+    this._connectError = null;
   }
 
   // Test helper: the SQL of every query issued so far, for order assertions.
@@ -106,10 +107,21 @@ class FakePool extends FakeQueryable {
     return this;
   }
 
+  // Test helper: make the next connect() fail, as a real pool does when the
+  // database is unreachable or the pool is exhausted.
+  failNextConnect(error) {
+    this._connectError = error || new Error("no connection available");
+  }
+
   // Hands out a connection backed by this same query log and response queue,
   // so a test programs a pool and its connections as one thing. `released`
   // lets a test assert the handler doesn't leak connections on its error paths.
   connect() {
+    if (this._connectError) {
+      const error = this._connectError;
+      this._connectError = null;
+      return Promise.reject(error);
+    }
     this.borrowed += 1;
     const pool = this;
     const connection = {
