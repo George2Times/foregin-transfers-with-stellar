@@ -81,9 +81,20 @@ never reaches the bridge call.
   theoretical one.
 - `npm test` in `infrastructure/` (`node --test test/*.test.js`, Node's
   built-in test runner, zero new dependencies) now runs 6 passing tests
-  covering both files' `/payment` handler: insufficient balance, DB
-  error, and the happy path (to guard against a fix that accidentally
-  breaks normal payments).
+  covering the `/payment` handler: insufficient balance, DB error, and the
+  happy path (to guard against a fix that accidentally breaks normal
+  payments).
+
+  > **Correction (2026-07-14).** As originally written, this bullet claimed
+  > those three cases covered "both files' `/payment` handler". They did not.
+  > `DBServerA.js` got all three; `DBServerB.js` got only the
+  > insufficient-balance case — 3 sub-tests against A, 1 against B. The fix
+  > itself *was* applied to both files, so the claim was wrong about the
+  > tests, not about the fix. It has since been made true: the `/payment`
+  > suite is now written once and run against both servers (13 sub-tests
+  > each, 26 total), because these two files are near-identical copies and
+  > testing one while eyeballing the other is exactly how a fix ends up
+  > half-applied. See the 2026-07-14 pass.
 
 ### 3. Several DB-error paths crashed the whole process instead of failing one request
 
