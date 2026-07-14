@@ -7,7 +7,6 @@ import assets from './Assets/Assets';
 var toml = require('toml');
 var concat = require('concat-stream');
 var fs = require('fs');
-const requestObj = require('request');
 const DBServer = '20.56.32.165:3600';
 
 
