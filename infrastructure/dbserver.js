@@ -325,8 +325,15 @@ function createDbServer(config) {
           );
         }
 
-        postForm(config.entryPointBS, paymentRequestForm)
-          .then(function (bridge) {
+        // Deliberately `.then(onSent, onNotSent)` and not `.then(...).catch(...)`.
+        // The two are not the same here: with a trailing .catch, anything the
+        // success handler threw would land in the rejection handler, which
+        // refunds -- so a payment the bridge had actually accepted would be
+        // refunded anyway, and that creates money out of nothing. A rejection
+        // handler passed to .then() only ever sees a failed call to the bridge,
+        // which is the only thing that may trigger a refund.
+        postForm(config.entryPointBS, paymentRequestForm).then(
+          function (bridge) {
             if (bridge.status !== 200) {
               // The bridge answered, and it said no. The payment did not happen.
               refundAndFail("bridge responded " + bridge.status, bridge.body);
@@ -339,15 +346,21 @@ function createDbServer(config) {
               msg: "SUCCESS!",
             });
             response.end();
-          })
-          .catch(function (error) {
+          },
+          function (error) {
             // The call never completed at all -- the bridge host is down, DNS
             // failed. For the sender's balance this is the same as an outright
             // rejection: money must not stay debited for a payment that never
             // left. (`request` reported this as an `err` argument; a rejected
             // promise is the same event by another name.)
             refundAndFail(error && error.message ? error.message : String(error), undefined);
-          });
+          }
+        ).catch(function (error) {
+          // Something threw while we were answering the caller, after the
+          // payment's outcome had already been decided and acted on. Log it;
+          // do NOT refund from here -- see above.
+          console.error("/payment: failed while answering the caller:", error);
+        });
       }
     );
   });

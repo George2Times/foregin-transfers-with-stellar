@@ -255,6 +255,43 @@ for (const { file, account, receiver } of SERVERS) {
       assert.equal(res.lastJson.msg, "ERROR!");
     });
 
+    // A sent payment must never be refunded. The bridge call is a promise now,
+    // and `.then(onSent).catch(onFailed)` would route anything the success path
+    // threw into the refund handler -- refunding a payment the bridge had
+    // already accepted, which creates money. The handler uses
+    // `.then(onSent, onNotSent)` precisely so the refund path can only be
+    // reached by a failed call to the bridge.
+    await t.test("does NOT refund when the bridge accepted but answering threw", async () => {
+      fresh();
+      client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // funds reserved
+      fetchFake.queueResponse({
+        ok: true,
+        status: 200,
+        text: JSON.stringify({ hash: "abc123" }),
+      });
+
+      // The payment goes through, and then answering the caller blows up.
+      const res = makeFakeResponse();
+      res.json = () => {
+        throw new Error("socket closed while writing the response");
+      };
+      handler(paymentRequest({ amount: "100" }), res);
+
+      // Let every pending continuation run, so a refund would have been issued
+      // by now if one were going to be.
+      await settle();
+      await settle();
+
+      const refunds = client
+        .sqlLog()
+        .filter((sql) => /balance = balance \+/.test(sql));
+      assert.deepEqual(
+        refunds,
+        [],
+        "the bridge accepted this payment -- refunding it would create money"
+      );
+    });
+
     await t.test("still responds if the refund itself fails", async () => {
       fresh();
       client.queueResponse({ error: null, results: { rowCount: 1, rows: [] } }); // debit applied
