@@ -20,58 +20,70 @@ var USD = new StellarSdk.Asset(
   "GAIHBCB57M2SDFQYUMANDBHW4YYMD3FJVK2OGHRKKCNF2HBZIRBKRX6E"
 );
 
+// The `.catch` below only covers what is chained *into* it. The inner
+// `loadAccount(...)` promise used to be started and then dropped on the floor
+// rather than returned, so the outer chain settled without waiting for it and a
+// failed `loadAccount` or `submitTransaction` -- the two calls that actually hit
+// the network -- rejected with nothing attached to catch them. Returning the
+// inner chain is what puts those failures in reach of the handler.
 server
   .fetchBaseFee()
   .then(function (fee) {
     console.log("Fee is", fee);
-    server.loadAccount(receivingKeys1.publicKey()).then(function (account) {
-      console.log("Account is", account);
-      var transaction = new StellarSdk.TransactionBuilder(account, {
-        fee,
-        networkPassphrase: "Standalone Network ; February 2017",
-      })
-        .addOperation(
-          StellarSdk.Operation.changeTrust({
-            asset: USD,
-            limit: "100000",
-            source: receivingKeys1.publicKey(),
-          })
-        )
-        .setTimeout(100)
-        .build();
+    return server
+      .loadAccount(receivingKeys1.publicKey())
+      .then(function (account) {
+        console.log("Account is", account);
+        var transaction = new StellarSdk.TransactionBuilder(account, {
+          fee,
+          networkPassphrase: "Standalone Network ; February 2017",
+        })
+          .addOperation(
+            StellarSdk.Operation.changeTrust({
+              asset: USD,
+              limit: "100000",
+              source: receivingKeys1.publicKey(),
+            })
+          )
+          .setTimeout(100)
+          .build();
 
-      transaction.sign(receivingKeys1);
-      return server.submitTransaction(transaction);
-    });
+        transaction.sign(receivingKeys1);
+        return server.submitTransaction(transaction);
+      });
   })
   .catch(function (error) {
     console.error("Error!", error);
+    process.exitCode = 1;
   });
 
 server
   .fetchBaseFee()
   .then(function (fee) {
     console.log("Fee is", fee);
-    server.loadAccount(receivingKeys2.publicKey()).then(function (account) {
-      console.log("Account is", account);
-      var transaction = new StellarSdk.TransactionBuilder(account, {
-        fee,
-        networkPassphrase: "Standalone Network ; February 2017",
-      })
-        .addOperation(
-          StellarSdk.Operation.changeTrust({
-            asset: USD,
-            limit: "100000",
-            source: receivingKeys2.publicKey(),
-          })
-        )
-        .setTimeout(100)
-        .build();
+    return server
+      .loadAccount(receivingKeys2.publicKey())
+      .then(function (account) {
+        console.log("Account is", account);
+        var transaction = new StellarSdk.TransactionBuilder(account, {
+          fee,
+          networkPassphrase: "Standalone Network ; February 2017",
+        })
+          .addOperation(
+            StellarSdk.Operation.changeTrust({
+              asset: USD,
+              limit: "100000",
+              source: receivingKeys2.publicKey(),
+            })
+          )
+          .setTimeout(100)
+          .build();
 
-      transaction.sign(receivingKeys2);
-      return server.submitTransaction(transaction);
-    });
+        transaction.sign(receivingKeys2);
+        return server.submitTransaction(transaction);
+      });
   })
   .catch(function (error) {
     console.error("Error!", error);
+    process.exitCode = 1;
   });
