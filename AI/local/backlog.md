@@ -99,7 +99,19 @@ access to finish the job — see `FLEET_NOTES.md`.
 
 ## Nice-to-have
 
-All six are now closed. The first two were done in the 2026-07-14 follow-up pass; the remaining
+The original six are all closed (see below). Two new items surfaced by a targeted
+2026-07-14 re-audit of the just-shipped `auth.js`, both defense-in-depth rather than a
+live break under the documented deployment:
+
+- No rate limiting or lockout on `/login` (`dbserver.js:78-117`) — a timing/enumeration
+  or brute-force attempt against confirmed accounts can run at unlimited speed.
+- Tokens carry no per-bank audience binding (`auth.js`'s `issueToken` payload is only
+  `{sub, exp}`). `FLEET_NOTES.md` already instructs a separate `SESSION_SECRET` per
+  bank; nothing in the code enforces or detects a shared secret, so violating that
+  documented instruction would let a token minted by one bank's `/login` also pass the
+  other bank's `requireAuth`.
+
+The first two of the original six were done in the 2026-07-14 follow-up pass; the remaining
 four in the 2026-07-14 dependency/duplication pass, in the order that made each one cheaper than
 the last — the A/B deduplication first, so that the pooling and `request` fixes were one edit
 apiece instead of two.
