@@ -99,17 +99,68 @@ access to finish the job — see `FLEET_NOTES.md`.
 
 ## Nice-to-have
 
-The original six are all closed (see below). Two new items surfaced by a targeted
-2026-07-14 re-audit of the just-shipped `auth.js`, both defense-in-depth rather than a
-live break under the documented deployment:
+All eight are now closed. The original six went in the 2026-07-14 passes; the two that a
+targeted re-audit of `auth.js` added were done in the 2026-07-14 auth-hardening pass below.
+Server tests 121 → 145, front ends 26 → 27 each, all passing.
 
-- No rate limiting or lockout on `/login` (`dbserver.js:78-117`) — a timing/enumeration
-  or brute-force attempt against confirmed accounts can run at unlimited speed.
-- Tokens carry no per-bank audience binding (`auth.js`'s `issueToken` payload is only
+- ~~No rate limiting or lockout on `/login` (`dbserver.js:78-117`) — a timing/enumeration
+  or brute-force attempt against confirmed accounts can run at unlimited speed.~~
+  **Fixed** (`528c9469`, plus `bb31daea` for the front ends). Everything else about the route
+  was already careful — the 401 is worded identically whether the account is unknown, has no
+  password, or the password is wrong, and scrypt makes each check deliberately slow — but none
+  of that costs an attacker anything if they may simply keep trying. Two failure budgets, in
+  separate tables: **5 failures locks the friendly ID** (stops a password list), **50 locks the
+  source address** (stops the same attacker sidestepping the first budget by spraying one
+  password across many accounts). Separate tables because an attacker who churns the per-account
+  table with thousands of made-up IDs must still accumulate failures against their own source
+  entry, in a table they cannot flood.
+  Only a failed *password attempt* counts: a missing field doesn't (or anyone could lock any
+  account out of its own bank by posting its ID with no password five times) and neither does a
+  database error (or a wobbly database would lock out every customer it has). A success clears
+  the account's count, so a typo followed by the right password leaves nothing behind. The check
+  runs *before* the lookup and the hashing — unlimited `/login` was a way to spend this server's
+  CPU as well as to guess at it. The lockout is keyed on the ID **as typed**, so an invented
+  account locks out exactly like a real one; otherwise the lockout would answer the question the
+  identical 401s exist to refuse.
+  **The item's "timing" half was a real, separate hole, and is also fixed:** `verifyPassword()`
+  returned false *immediately* when the row had no usable hash and spent ~100ms of scrypt when it
+  did. The reply was identical; how long it took to arrive was not, and that is just as good an
+  answer to "does alice bank here?" as an error message would be. It now checks against a
+  throwaway hash and discards the result. Pinned by a timing test (~100ms vs ~0 before).
+  19 new sub-tests; the four route cases and the timing one all fail against the pre-fix source.
+  The front ends were showing a flat "Login failed" for a 429 — i.e. telling someone whose
+  password is *correct* that it is wrong, so they retry, and each retry restarts the cooldown.
+  They now show the server's reason.
+  **Needs a human if this is ever deployed behind a proxy:** the per-source budget keys on
+  `request.ip`, which Express only fills from `X-Forwarded-For` once `trust proxy` is set.
+  Behind an untrusted-proxy setup the whole internet shares one budget and one attacker could
+  lock out the entire bank. Written up in `FLEET_NOTES.md` §4, along with what the lockout
+  deliberately isn't (in-memory, per-process: cleared by a restart, not shared between instances).
+- ~~Tokens carry no per-bank audience binding (`auth.js`'s `issueToken` payload is only
   `{sub, exp}`). `FLEET_NOTES.md` already instructs a separate `SESSION_SECRET` per
   bank; nothing in the code enforces or detects a shared secret, so violating that
   documented instruction would let a token minted by one bank's `/login` also pass the
-  other bank's `requireAuth`.
+  other bank's `requireAuth`.~~
+  **Fixed** (`0f63402c`). A token said only "this is alice, until 14:05" and not *which bank's*
+  alice — and the two banks run the same code over separate databases in which "alice" is a
+  different customer with different money. What kept them apart was a sentence in
+  `FLEET_NOTES.md`, and a document is not an enforcement mechanism: paste the same secret into
+  both (the obvious thing to do — it is one setting and they are one demo) and every token minted
+  by A's `/login` was correctly signed, unexpired, and accepted by B's `requireAuth`. No forgery
+  needed; A's alice could read B's alice's balance and spend her money.
+  Tokens now carry `aud` and `requireAuth` refuses one naming the other bank. It's inside the
+  signed payload, so a holder cannot re-point it. The value is the **federation domain** rather
+  than a new config field, because that domain already has to be distinct for the two banks to
+  tell each other's customers apart — a third bank cannot collide with an existing audience
+  without also being unable to receive a payment. Both directions fail closed: `issueToken`
+  refuses to mint an audience-less token rather than mint one good everywhere, `verifyToken`
+  refuses to check against no audience rather than accept all comers, and a token predating the
+  change has no `aud` and is dead (they last an hour, so that costs one re-login).
+  This does **not** make a shared `SESSION_SECRET` safe — each bank can still *mint* tokens the
+  other will honour — it means an operator who ignores the instruction no longer silently merges
+  the two banks' customers. `FLEET_NOTES.md` §2 now says exactly that.
+  4 new sub-tests plus a cross-bank case on every protected route of both servers. Removing just
+  the `aud` comparison fails the token suite and both banks' route suites.
 
 The first two of the original six were done in the 2026-07-14 follow-up pass; the remaining
 four in the 2026-07-14 dependency/duplication pass, in the order that made each one cheaper than
@@ -235,13 +286,18 @@ apiece instead of two.
   list (hardcoded local Postgres creds, a dead hardcoded IP, dev TLS certs, the vendored
   binaries, an unused `my-app` CRA scaffold) — this audit's findings are additional to, not a
   repeat of, that list.
-- No live network, blockchain, or database call was made in the 2026-07-14 pass or either
-  follow-up. All 121 server tests (103 from the must-have pass, 10 from the `/test` route suite,
-  6 for the DB-server pool, 2 for the bridge-refund hazard) run offline against hand-written
-  `pg`/`express`/`node-fetch` fakes that load the real server files, so the route handlers under
-  test are the committed ones, not re-implementations. The `request` fake is gone with the package.
-  The front ends carry 26 Jest tests each (was 6), which do run — only `react-scripts build` is
-  broken on Node 26, not the test runner.
+- No live network, blockchain, or database call was made in the 2026-07-14 pass or any of its
+  follow-ups. All 145 server tests (103 from the must-have pass, 10 from the `/test` route suite,
+  6 for the DB-server pool, 2 for the bridge-refund hazard, 24 from the auth-hardening pass) run
+  offline against hand-written `pg`/`express`/`node-fetch` fakes that load the real server files,
+  so the route handlers under test are the committed ones, not re-implementations. The `request`
+  fake is gone with the package. The front ends carry 27 Jest tests each (was 6), which do run —
+  only `react-scripts build` is broken on Node 26, not the test runner.
+- The `/login` lockout tests are the one place where a test's own cost mattered: every failed
+  login now really does run scrypt (~100ms), that being the production path. The shipped limit of
+  5 failures per account is exercised end-to-end against the real `DBServerA/B` files; the
+  counting rules that would need dozens of failures (the per-source budget in particular) are
+  driven through `createDbServer` with a small budget configured, which is the same handler.
 - The one npm command run against the network was `npm install --package-lock-only` in
   `infrastructure/`, to regenerate the lockfile after dropping `request`/`react-scripts`. It
   resolves metadata only and installs nothing; `infrastructure/` still has no `node_modules`, and
