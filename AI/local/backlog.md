@@ -99,9 +99,32 @@ access to finish the job — see `FLEET_NOTES.md`.
 
 ## Nice-to-have
 
-All eight are now closed. The original six went in the 2026-07-14 passes; the two that a
+The original eight are closed: the first six went in the 2026-07-14 passes; the two that a
 targeted re-audit of `auth.js` added were done in the 2026-07-14 auth-hardening pass below.
 Server tests 121 → 145, front ends 26 → 27 each, all passing.
+
+Two items are **open** below. Both were already decided-and-deferred by the passes that closed
+the items they came from — but they were recorded only inside the *body* of struck-through
+"Fixed" entries, where the section header ("all closed") and a bullet-level read both miss them,
+and neither reached `FLEET_NOTES.md`. Promoted to plain bullets so they are actually visible;
+the deferral reasoning is unchanged, only where it is written down. (Found by the 2026-07-14
+fleet-audit cycle 4 — the first cycle in which this repo was idle long enough to review.)
+
+- `stellar/`'s dependency tree still carries CVE-2023-26136 (prototype pollution in
+  `tough-cookie`). `stellar/package.json` declares `request@^2.88.2`, and `stellar/federationAtest.js:1`
+  and `stellar/test_FSA.js:1` still `require('request')` — so dropping the package from
+  `infrastructure/` (`5c916fa1`) removed the CVE from the payment servers but *not* from the repo.
+  Verified still present this cycle. Scope note: the servers that move customer money are clean;
+  this is confined to two standalone CLI scripts against a live Stellar network.
+- `stellar/federationAtest.js:11` and `stellar/test_FSA.js:9` ignore the `error` argument of their
+  `request` callbacks and log an `undefined` body on failure (`federationAtest.js`'s callback is
+  `function (error, response, body) { console.log(body); }` — `error` is received and never read),
+  so a failed network call prints `undefined` and exits 0. Same *silent network failure* class as
+  the promise item below, different mechanism: these callbacks do get a real error, nobody reads it.
+  **These two are one job, not two** — both scripts are the only remaining `request` callers, so
+  whoever rewrites them onto `fetch` removes the CVE in the same edit. Untestable offline (thin
+  wrappers around a live Stellar network, no suite), which is why the earlier pass declined to do
+  it unattended rather than break a working script to satisfy an audit.
 
 - ~~No rate limiting or lockout on `/login` (`dbserver.js:78-117`) — a timing/enumeration
   or brute-force attempt against confirmed accounts can run at unlimited speed.~~
