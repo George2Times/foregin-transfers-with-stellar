@@ -90,7 +90,7 @@ access to finish the job — see `FLEET_NOTES.md`.
   and `DBServerB.js` got tests for "insufficient balance, DB error, and the happy path," but
   `DBServerB.js`'s `/payment` handler only has the insufficient-balance case actually tested
   (confirmed by running `npm test`: DBServerA gets 3 sub-tests, DBServerB gets 1).~~
-  **Fixed** (`fbdb703d`). Confirmed the report was right: A had 3 sub-tests, B had 1. Rather than
+  **Fixed** (`5170ba66`). Confirmed the report was right: A had 3 sub-tests, B had 1. Rather than
   just softening the sentence, the claim was made true — the `/payment` suite is now written once
   and run against both servers (13 sub-tests each, 26 total). `HARDENING.md` carries a dated
   correction saying what it originally got wrong and why (the *fix* had been applied to both
