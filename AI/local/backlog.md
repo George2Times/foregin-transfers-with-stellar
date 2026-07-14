@@ -99,19 +99,42 @@ access to finish the job — see `FLEET_NOTES.md`.
 
 ## Nice-to-have
 
-Not touched in this pass (out of scope — must-haves only), except where noted.
+Mostly not touched in the 2026-07-14 pass (out of scope — must-haves only). The two items
+below were finished in the 2026-07-14 follow-up pass; the rest are still open.
 
-- The pervasive `.then(function(response, error) {...})` pattern (front end and Stellar
+- ~~The pervasive `.then(function(response, error) {...})` pattern (front end and Stellar
   scripts) never actually catches promise rejections — `.then()`'s single callback only ever
   receives the resolved value, so `error` is always `undefined` and network failures fail
-  silently with no user feedback.
-  *(Partially overtaken: the four fetch calls in each `App.js` were rewritten as part of the auth
-  work and now have real `.catch()` handlers and surface failures to the user. The Stellar scripts
-  under `stellar/` still have the original pattern.)*
-- Nested pg-query error callbacks in `/payment`/`/receive` omit `return` after sending an
+  silently with no user feedback.~~
+  **Fixed** (`8fc5e125` for `stellar/`, `0fbc824d` for the servers). The `App.js` front ends had
+  already been rewritten with real `.catch()` handlers by the auth work. This pass cleared the
+  remaining sites, and found a third the item hadn't named:
+  - `stellar/TransferUSD.js` — the broken shape itself, plus no `.catch` anywhere and the inner
+    chain never returned to the outer callback, so a rejection had *no* handler attached. Fixed
+    in the live block and in both commented-out transfer variants: the file's idiom is to
+    comment-toggle which transfer runs, so a dormant copy of the bug is a live one in waiting.
+  - `stellar/CreateAssetUSD.js` — had a `.catch`, but the inner `loadAccount(...)` chain was
+    started and dropped rather than returned, so the catch only ever covered `fetchBaseFee`, not
+    the two calls that actually touch the network. Same class, quieter about it.
+  - **`/test` in `CallbacksA/B.js`** — the same shape, inside a payment server, and the worst of
+    the three: no `.catch` meant a rejected fetch sent *no HTTP response at all* and hung the
+    caller (the never-responds class the must-haves fixed in `/payment`), and `if (response)` was
+    true for a 404, so a failed lookup was reported to the caller as a success carrying no toml.
+    Now 200 with the body, or 502. 8 new sub-tests across both copies; 103 → 113, all passing.
+    The three error-path cases fail against the pre-fix source.
+  Both scripts now also exit non-zero on failure, so a failed run is visible to whatever ran them.
+  **Still open, deliberately:** `stellar/federationAtest.js` and `stellar/test_FSA.js` ignore the
+  `error` argument of their `request` callbacks and log an `undefined` body on failure. That is
+  the same *silent network failure* complaint, but it is a different mechanism — those callbacks
+  do receive a real error; nobody reads it — so it is left for a pass that scopes it.
+- ~~Nested pg-query error callbacks in `/payment`/`/receive` omit `return` after sending an
   error response, leaving them fragile to a future "headers already sent" crash if the
-  fall-through code path ever stops being harmless by coincidence.
-  *(Overtaken: both handlers were rewritten in this pass and every error branch now returns.)*
+  fall-through code path ever stops being harmless by coincidence.~~
+  **Overtaken, verified, no code change.** Re-read both handlers against this item rather than
+  trusting the earlier annotation: `/receive` is now one `async`/`await` block whose every error
+  branch returns (including the `23505` duplicate path), and `/payment`'s callbacks all `return`
+  after responding. There is no remaining fall-through to harden, so this item is closed as
+  already-fixed by the must-have rewrites rather than by new work.
 - `request@2.88.2` (used for the bridge-server HTTP call) is deprecated/unmaintained and pulls
   in a `tough-cookie` version with a known prototype-pollution CVE (CVE-2023-26136).
 - Each server holds a single non-pooled `pg.Client` with no reconnect logic — a dropped DB
@@ -147,9 +170,14 @@ Not touched in this pass (out of scope — must-haves only), except where noted.
   list (hardcoded local Postgres creds, a dead hardcoded IP, dev TLS certs, the vendored
   binaries, an unused `my-app` CRA scaffold) — this audit's findings are additional to, not a
   repeat of, that list.
-- No live network, blockchain, or database call was made in the 2026-07-14 pass either. All 103
-  tests run offline against hand-written `pg`/`express`/`request` fakes that load the real server
-  files, so the route handlers under test are the committed ones, not re-implementations.
+- No live network, blockchain, or database call was made in the 2026-07-14 pass or its follow-up.
+  All 113 tests (103 from the must-have pass, 10 more from the follow-up's `/test` route suite)
+  run offline against hand-written `pg`/`express`/`request`/`node-fetch` fakes that load the real
+  server files, so the route handlers under test are the committed ones, not re-implementations.
+- The Stellar scripts under `stellar/` have no tests: they are thin CLI wrappers whose every
+  branch is a call to a live Stellar network, so the promise-error fixes there were reviewed and
+  syntax-checked but not driven end-to-end. The equivalent fix in `CallbacksA/B`'s `/test` route
+  *is* covered, because that one can be faked offline.
 - `react-scripts build` fails in both front ends on Node 26 (`ERR_PACKAGE_PATH_NOT_EXPORTED` from
   a nested `postcss`). Pre-existing — it fails identically on the untouched 2021 code — and not
   something this pass tried to fix. The apps' Jest tests do still run and pass.
